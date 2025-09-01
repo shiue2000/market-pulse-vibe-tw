@@ -44,7 +44,7 @@
         <section class="bg-red-50 border-l-4 border-red-500 p-4 rounded-md mb-6">
             <p class="text-red-700 font-medium">❌ {{ result.error }}</p>
         </section>
-        {% endif %}
+        {% endif %} <!-- End of error section if -->
 
         <!-- Result Sections -->
         {% if result.symbol %}
@@ -64,7 +64,8 @@
                             </span>
                         {% else %}
                             N/A
-                        {% endif %}<br>
+                        {% endif %} <!-- End of daily_change if -->
+                        <br>
                         <span class="font-semibold">交易量 | Volume:</span> {{ result.quote.volume | default('N/A') }}
                     </p>
                 </div>
@@ -79,13 +80,15 @@
                                 {% elif result.technical.rsi < 30 %}(超賣 | Oversold)
                                 {% else %}(中性 | Neutral){% endif %}
                             </span>
-                        {% endif %}<br>
+                        {% endif %} <!-- End of rsi if -->
+                        <br>
                         <span class="font-semibold">MACD:</span> {{ result.technical.macd | default('N/A') }}
                         {% if result.technical.macd is defined and result.technical.macd is not none %}
                             <span class="{% if result.technical.macd > 0 %}text-green-600{% else %}text-red-600{% endif %}">
                                 {% if result.technical.macd > 0 %}(看漲 | Bullish){% else %}(看跌 | Bearish){% endif %}
                             </span>
-                        {% endif %}<br>
+                        {% endif %} <!-- End of macd if -->
+                        <br>
                         <span class="font-semibold">支撐位 | Support Level:</span> {{ result.technical.support | default('N/A') }}<br>
                         <span class="font-semibold">阻力位 | Resistance Level:</span> {{ result.technical.resistance | default('N/A') }}
                     </p>
@@ -117,7 +120,7 @@
                         {% else %}
                             <span class="text-gray-600">無明確建議 | No Clear Recommendation:</span>
                             {{ result.gpt_analysis | default('無法取得 AI 回應 | Unable to obtain AI response') | safe }}
-                        {% endif %}
+                        {% endif %} <!-- End of recommendation if -->
                     </p>
                     <p class="text-sm text-gray-600 mt-2">
                         <span class="font-semibold">風險評估 | Risk Assessment:</span>
@@ -197,7 +200,7 @@
                 {% endfor %}
             </div>
         </section>
-        {% endif %}
+        {% endif %} <!-- End of news section if -->
 
         <!-- Choose Your Plan Section -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
@@ -218,9 +221,9 @@
                             {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests)
                         </button>
                     </form>
-                    {% endif %}
+                    {% endif %} <!-- End of tier if -->
                 </div>
-                {% endfor %}
+                {% endfor %} <!-- End of tier loop -->
             </div>
         </section>
 
