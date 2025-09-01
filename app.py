@@ -7,11 +7,9 @@ from collections import namedtuple
 import requests
 from flask import Flask, request, render_template, jsonify, redirect, session, flash
 import stripe
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, BitsAndBytesConfig
-from peft import PeftModel
-import logging
 import numpy as np
+from openai import OpenAI
+import logging
 
 # Ensure NumPy version is <2.0 for compatibility
 assert np.__version__.startswith("1."), "NumPy version must be <2.0"
@@ -46,6 +44,12 @@ else:
 if not STRIPE_SECRET_KEY or not STRIPE_PUBLISHABLE_KEY:
     raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in .env")
 stripe.api_key = STRIPE_SECRET_KEY
+
+# OpenAI setup
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+if not OPENAI_API_KEY:
+    raise RuntimeError("❌ OpenAI API key not set in .env")
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # In-memory storage for user data
 user_data = {}
@@ -82,6 +86,11 @@ try:
     from json.decoder import JSONDecodeError
 except ImportError:
     JSONDecodeError = ValueError
+
+try:
+    from twstock import codes
+except ImportError:
+    codes = {}  # Fallback if twstock.codes is not available
 
 TWSE_BASE_URL = "http://www.twse.com.tw/"
 TPEX_BASE_URL = "http://www.tpex.org.tw/"
@@ -192,7 +201,7 @@ class Stock:
         self.fetcher = TWSEFetcher() if market == "上市" else TPEXFetcher()
         self.raw_data = []
         self.data = []
-        self.fetch_31()
+        self.fetch_90()  # Fetch 90 days to ensure enough data for 50-day MA
     def _month_year_iter(self, start_month, start_year, end_month, end_year):
         ym_start = 12 * start_year + start_month - 1
         ym_end = 12 * end_year + end_month
@@ -211,11 +220,11 @@ class Stock:
             self.raw_data.append(self.fetcher.fetch(year, month, self.sid))
             self.data.extend(self.raw_data[-1]["data"])
         return self.data
-    def fetch_31(self):
+    def fetch_90(self):
         today = datetime.datetime.today()
-        before = today - datetime.timedelta(days=60)
+        before = today - datetime.timedelta(days=120)  # Fetch 120 days to ensure 50+ days
         self.fetch_from(before.year, before.month)
-        self.data = self.data[-31:]
+        self.data = self.data[-90:]  # Limit to last 90 days
         return self.data
     @property
     def date(self):
@@ -248,45 +257,13 @@ class Stock:
     def transaction(self):
         return [d.transaction for d in self.data]
 
-# Initialize Llama 3 8B model with QLoRA
-def initialize_llama_model():
-    try:
-        device_map = {"": 0} if torch.cuda.is_available() else "cpu"
-        use_4bit = True
-        bnb_4bit_compute_dtype = "float16"
-        bnb_4bit_quant_type = "nf4"
-        use_nested_quant = False
-        compute_dtype = getattr(torch, bnb_4bit_compute_dtype)
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=use_4bit,
-            bnb_4bit_quant_type=bnb_4bit_quant_type,
-            bnb_4bit_compute_dtype=compute_dtype,
-            bnb_4bit_use_double_quant=use_nested_quant,
-        )
-        based_model_path = "DavidLanz/Llama3-tw-8B-Instruct"
-        adapter_path = "DavidLanz/llama3_8b_taiwan_stock_qlora"
-        base_model = AutoModelForCausalLM.from_pretrained(
-            based_model_path,
-            low_cpu_mem_usage=True,
-            return_dict=True,
-            quantization_config=bnb_config if torch.cuda.is_available() else None,
-            torch_dtype=torch.float16,
-            device_map=device_map,
-        )
-        model = PeftModel.from_pretrained(base_model, adapter_path)
-        tokenizer = AutoTokenizer.from_pretrained(based_model_path, trust_remote_code=True)
-        text_gen_pipeline = pipeline(
-            "text-generation",
-            model=model,
-            model_kwargs={"torch_dtype": torch.bfloat16},
-            tokenizer=tokenizer,
-        )
-        return text_gen_pipeline, tokenizer
-    except Exception as e:
-        logger.error(f"Failed to initialize Llama model: {e}")
-        return None, None
-
-llama_pipeline, llama_tokenizer = initialize_llama_model()
+def get_stock_name(symbol):
+    # Try twstock.codes first
+    if codes and symbol in codes:
+        return codes[symbol].name
+    # Fallback to Finnhub
+    profile = get_finnhub_json("stock/profile2", {"symbol": f"{symbol}.TW"})
+    return profile.get("name", "Unknown")
 
 def get_finnhub_json(endpoint, params):
     url = f"https://finnhub.io/api/v1/{endpoint}"
@@ -320,14 +297,17 @@ def get_stock_data(symbol):
         return {'error': '股票代號必須為4位數字 | Stock ID must be a 4-digit number'}
     
     try:
-        # Assume TWSE (上市) for simplicity; adjust based on actual stock market if needed
+        # Try TWSE (上市) first
         stock = Stock(symbol, market="上市")
+        market = "上市"
         if not stock.data:
-            # Try TPEX if TWSE fails
+            # Fallback to TPEX (上櫃)
             stock = Stock(symbol, market="上櫃")
+            market = "上櫃"
             if not stock.data:
                 return {'error': f'無法獲取股票 {symbol} 的數據 | No data available for {symbol}'}
 
+        stock_name = get_stock_name(symbol)
         latest_data = stock.data[-1]
         prev_data = stock.data[-2] if len(stock.data) >= 2 else None
         current_price = latest_data.close
@@ -344,21 +324,23 @@ def get_stock_data(symbol):
             'prev_close': round(prev_close, 2) if prev_close else 'N/A'
         }
 
-        # Simple technical indicators using stock data
+        # Calculate technical indicators
         prices = [d.close for d in stock.data if d.close is not None]
         if len(prices) >= 50:
-            ma50 = sum(prices[-50:]) / 50
+            ma50 = np.mean(prices[-50:])
             support = min(prices[-50:])
             resistance = max(prices[-50:])
+        elif prices:
+            ma50 = np.mean(prices)
+            support = min(prices)
+            resistance = max(prices)
         else:
             ma50 = support = resistance = 'N/A'
         
         technical = {
-            'ma50': round(ma50, 2) if ma50 != 'N/A' else 'N/A',
-            'rsi': 'N/A',  # RSI not implemented for simplicity
-            'macd': 'N/A',  # MACD not implemented for simplicity
-            'support': round(support, 2) if support != 'N/A' else 'N/A',
-            'resistance': round(resistance, 2) if resistance != 'N/A' else 'N/A'
+            'ma50': round(ma50, 2) if isinstance(ma50, (int, float)) else 'N/A',
+            'support': round(support, 2) if isinstance(support, (int, float)) else 'N/A',
+            'resistance': round(resistance, 2) if isinstance(resistance, (int, float)) else 'N/A'
         }
 
         # Placeholder for financial metrics (not available via twstock)
@@ -369,107 +351,90 @@ def get_stock_data(symbol):
             'eps_growth': 'N/A'
         }
 
-        def analyze_stock(quote, technical, metrics):
-            if llama_pipeline is None or llama_tokenizer is None:
-                recommendation = 'hold'
-                rationale = '由於目前缺乏關鍵的財務和技術指標數據，無法確定該股票的具體價值和趨勢，因此建議持有觀望。 | Due to the lack of key financial and technical indicator data, it is difficult to determine the specific value and trend of this stock, thus a hold recommendation is advised.'
-                risk = '缺乏數據可能導致投資決策的不確定性，投資者需謹慎評估。 | The lack of data may lead to uncertainty in investment decisions, and investors should assess carefully.'
-                summary = '在缺乏具體財務和技術指標的情況下，建議投資者持有該股票，並持續關注未來的市場動態。 | In the absence of specific financial and technical indicators, investors are advised to hold this stock and continue to monitor future market developments.'
-                return {
-                    'recommendation': recommendation,
-                    'rationale': rationale,
-                    'risk': risk,
-                    'summary': summary
-                }
-
-            last_trading_day = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y-%m-%d')
-            messages = [
-                {
-                    "role": "system",
-                    "content": "你是一位專業的台灣股市交易分析師"
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"{symbol} 上一個交易日的表現，"
-                        f"開盤價是 {quote['open_price'] if quote['open_price'] != 'N/A' else '未知'}, "
-                        f"當日最高價是 {quote['high_price'] if quote['high_price'] != 'N/A' else '未知'}, "
-                        f"當日最低價是 {quote['low_price'] if quote['low_price'] != 'N/A' else '未知'}, "
-                        f"收盤價是 {quote['current_price'] if quote['current_price'] != 'N/A' else '未知'}, "
-                        f"與前一天相比變化 {quote['daily_change'] if quote['daily_change'] != 'N/A' else '未知'}%, "
-                        f"成交股數為 {quote['volume'] if quote['volume'] != 'N/A' else '未知'}, "
-                        f"MA50: {technical['ma50'] if technical['ma50'] != 'N/A' else '未知'}. "
-                        f"請預測今天的收盤價並提供投資建議、風險評估和總結。"
-                    )
-                }
-            ]
-            prompt = llama_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            terminators = [
-                llama_tokenizer.eos_token_id,
-                llama_tokenizer.convert_tokens_to_ids("<|eot_id|>")
-            ]
+        def analyze_stock(stock_name, symbol, quote, technical, metrics):
             try:
-                outputs = llama_pipeline(
-                    prompt,
-                    max_new_tokens=256,
-                    eos_token_id=terminators,
-                    do_sample=True,
-                    temperature=0.6,
-                    top_p=0.9,
+                prompt = f"""
+                你是一位專業的台灣股市交易分析師。請根據以下股票數據為股票 {stock_name} ({symbol}) 提供投資建議：
+
+                - 開盤價: {quote['open_price'] if quote['open_price'] != 'N/A' else '未知'}
+                - 當日最高價: {quote['high_price'] if quote['high_price'] != 'N/A' else '未知'}
+                - 當日最低價: {quote['low_price'] if quote['low_price'] != 'N/A' else '未知'}
+                - 收盤價: {quote['current_price'] if quote['current_price'] != 'N/A' else '未知'}
+                - 當日變化: {quote['daily_change'] if quote['daily_change'] != 'N/A' else '未知'}%
+                - 成交股數: {quote['volume'] if quote['volume'] != 'N/A' else '未知'}
+                - 50日移動平均線: {technical['ma50'] if technical['ma50'] != 'N/A' else '未知'}
+                - 支撐位: {technical['support'] if technical['support'] != 'N/A' else '未知'}
+                - 阻力位: {technical['resistance'] if technical['resistance'] != 'N/A' else '未知'}
+
+                請提供：
+                1. 投資建議 (買入/賣出/持有 | Buy/Sell/Hold)
+                2. 理由 (Rationale)
+                3. 風險評估 (Risk Assessment)
+                4. 總結 (Summary)
+                回答需簡潔，並以中文和英文提供，格式如下：
+                - 投資建議: [建議] | [Recommendation]
+                - 理由: [理由] | [Rationale]
+                - 風險評估: [風險] | [Risk]
+                - 總結: [總結] | [Summary]
+                """
+                response = openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "你是一位專業的台灣股市交易分析師，提供精確且簡潔的投資建議。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=500,
+                    temperature=0.7
                 )
-                generated_text = outputs[0]["generated_text"][len(prompt):].strip()
+                generated_text = response.choices[0].message.content.strip()
                 recommendation = 'hold'
-                rationale = '模型未提供明確建議。 | Model did not provide a clear recommendation.'
+                rationale = '無法解析明確建議。 | Unable to parse clear recommendation.'
                 risk = '中等風險，需密切關注市場動態。 | Moderate risk, monitor market dynamics closely.'
-                summary = '根據模型分析，投資決策應謹慎，持續關注市場變化。 | Based on model analysis, investment decisions should be cautious, with ongoing market monitoring.'
-                predicted_price = 'N/A'
+                summary = '根據數據，投資決策應謹慎，持續關注市場變化。 | Based on data, investment decisions should be cautious with ongoing market monitoring.'
+                
                 for line in generated_text.split('\n'):
                     line = line.strip()
-                    if line.startswith('預測收盤價:') or line.startswith('Predicted Close:'):
-                        predicted_price = line.split(':')[-1].strip()
-                    elif line.startswith('建議:') or line.startswith('Recommendation:'):
-                        recommendation = line.split(':')[-1].strip().lower()
-                        if '買入' in recommendation or 'buy' in recommendation:
+                    if line.startswith('投資建議:') or line.startswith('Recommendation:'):
+                        rec_text = line.split(':', 1)[-1].strip().lower()
+                        if '買入' in rec_text or 'buy' in rec_text:
                             recommendation = 'buy'
-                        elif '賣出' in recommendation or 'sell' in recommendation:
+                        elif '賣出' in rec_text or 'sell' in rec_text:
                             recommendation = 'sell'
                         else:
                             recommendation = 'hold'
                     elif line.startswith('理由:') or line.startswith('Rationale:'):
-                        rationale = line.split(':')[-1].strip()
-                    elif line.startswith('風險:') or line.startswith('Risk:'):
-                        risk = line.split(':')[-1].strip()
+                        rationale = line.split(':', 1)[-1].strip()
+                    elif line.startswith('風險評估:') or line.startswith('Risk:'):
+                        risk = line.split(':', 1)[-1].strip()
                     elif line.startswith('總結:') or line.startswith('Summary:'):
-                        summary = line.split(':')[-1].strip()
-                return {
-                    'recommendation': recommendation,
-                    'rationale': rationale,
-                    'risk': risk,
-                    'summary': summary,
-                    'predicted_price': predicted_price
-                }
-            except Exception as e:
-                logger.error(f"Llama model inference failed: {e}")
-                recommendation = 'hold'
-                rationale = '模型推斷失敗，採用後備邏輯。 | Model inference failed, using fallback logic.'
-                risk = '中等風險，需密切關注市場動態。 | Moderate risk, monitor market dynamics closely.'
-                summary = '由於模型推斷失敗，建議謹慎並持續關注市場。 | Due to model inference failure, exercise caution and monitor market trends.'
+                        summary = line.split(':', 1)[-1].strip()
+                
                 return {
                     'recommendation': recommendation,
                     'rationale': rationale,
                     'risk': risk,
                     'summary': summary
                 }
+            except Exception as e:
+                logger.error(f"OpenAI analysis failed: {e}")
+                return {
+                    'recommendation': 'hold',
+                    'rationale': '分析失敗，採用後備邏輯。 | Analysis failed, using fallback logic.',
+                    'risk': '中等風險，需密切關注市場動態。 | Moderate risk, monitor market dynamics closely.',
+                    'summary': '由於分析失敗，建議謹慎並持續關注市場。 | Due to analysis failure, exercise caution and monitor market trends.'
+                }
 
-        gpt_analysis = analyze_stock(quote, technical, metrics)
+        gpt_analysis = analyze_stock(stock_name, symbol, quote, technical, metrics)
         news = get_recent_news(symbol)
         return {
             'symbol': symbol,
+            'stock_name': stock_name,
             'quote': quote,
             'technical': technical,
             'metrics': metrics,
             'gpt_analysis': gpt_analysis,
             'industry_en': 'Unknown',  # Not available via twstock
+            'market': market,
             'news': news
         }
     except Exception as e:
