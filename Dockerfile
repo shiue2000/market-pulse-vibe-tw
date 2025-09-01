@@ -1,28 +1,32 @@
 FROM python:3.10-slim
+
+# Set working directory
 WORKDIR /app
 
-# Copy requirements file
-COPY requirements.txt .
-
-# Install system dependencies and Python packages
+# Install system dependencies for Redis, Python, and Llama model
 RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -r requirements.txt
+    redis-tools \
+    build-essential \
+    libffi-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy application code
-COPY . .
+# Copy requirements.txt
 COPY requirements.txt .
-RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
-# Expose the port (Railway assigns dynamically, default to 7860)
-EXPOSE 8080
-ENV PORT=8080
 
-# Set environment variables for Flask and logging
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application files
+COPY app.py .
+COPY templates/index.html templates/index.html
+
+# Expose port for Flask app
+EXPOSE 8080
+
+# Set environment variables (optional, can be overridden in docker-compose.yml)
 ENV FLASK_APP=app.py
-ENV FLASK_ENV=production
-ENV PYTHONUNBUFFERED=1
+ENV FLASK_ENV=development
 
 COPY templates /app/templates
 
