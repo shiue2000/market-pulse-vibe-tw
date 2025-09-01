@@ -17,5 +17,8 @@ bitsandbytes==0.43.3
 numpy<2.0
 pybind11>=2.12
 
-
+finnhub-python==2.4.20
+beautifulsoup4==4.12.3
+feedparser==6.0.11
+tiktoken==0.7.0
 
