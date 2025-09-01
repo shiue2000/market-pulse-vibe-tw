@@ -9,17 +9,10 @@ from flask import Flask, request, render_template, jsonify, redirect, session, f
 import stripe
 import numpy as np
 import logging
+from openai import OpenAI
 
 # Ensure NumPy version is <2.0 for compatibility
 assert np.__version__.startswith("1."), "NumPy version must be <2.0"
-
-# Check OpenAI version and import appropriately
-try:
-    from openai import OpenAI
-    OPENAI_MODERN = True
-except ImportError:
-    import openai
-    OPENAI_MODERN = False
 
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'supersecretkey')
@@ -56,10 +49,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OpenAI API key not set in .env")
-if not OPENAI_MODERN:
-    openai.api_key = OPENAI_API_KEY
-else:
-    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # In-memory storage for user data
 user_data = {}
@@ -387,29 +377,16 @@ def get_stock_data(symbol):
                 - 風險評估: [風險] | [Risk]
                 - 總結: [總結] | [Summary]
                 """
-                if OPENAI_MODERN:
-                    response = openai_client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": "你是一位專業的台灣股市交易分析師，提供精確且簡潔的投資建議。"},
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=500,
-                        temperature=0.7
-                    )
-                    generated_text = response.choices[0].message.content.strip()
-                else:
-                    openai.api_key = OPENAI_API_KEY
-                    response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=[
-                            {"role": "system", "content": "你是一位專業的台灣股市交易分析師，提供精確且簡潔的投資建議。"},
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=500,
-                        temperature=0.7
-                    )
-                    generated_text = response.choices[0].message['content'].strip()
+                response = openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "你是一位專業的台灣股市交易分析師，提供精確且簡潔的投資建議。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=500,
+                    temperature=0.7
+                )
+                generated_text = response.choices[0].message.content.strip()
                 
                 recommendation = 'hold'
                 rationale = '無法解析明確建議。 | Unable to parse clear recommendation.'
