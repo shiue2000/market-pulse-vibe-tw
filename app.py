@@ -1,3 +1,4 @@
+```python
 import os
 from datetime import datetime, timedelta
 from flask import Flask, request, render_template, jsonify, redirect
@@ -13,8 +14,15 @@ from peft import PeftModel
 
 app = Flask(__name__)
 
-# Redis setup
-r = redis.Redis(host='redis', port=6379, db=0)
+# Redis setup with error handling
+try:
+    r = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
+    r.ping()  # Test connection
+    redis_available = True
+except redis.ConnectionError as e:
+    print(f"Redis connection failed: {e}. Falling back to default values.")
+    redis_available = False
+    r = None
 
 # Stripe setup
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
@@ -209,7 +217,6 @@ def get_stock_data(symbol):
                 generated_text = outputs[0]["generated_text"][len(prompt):].strip()
 
                 # Parse the generated text (assuming model outputs structured response)
-                # Example: "預測收盤價: 215.00\n建議: 買入\n理由: RSI顯示中性，MACD看漲\n風險: 中等\n總結: 建議買入並關注市場動態"
                 recommendation = 'hold'
                 rationale = '模型未提供明確建議。 | Model did not provide a clear recommendation.'
                 risk = '中等風險，需密切關注市場動態。 | Moderate risk, monitor market dynamics closely.'
@@ -241,7 +248,7 @@ def get_stock_data(symbol):
                     'rationale': rationale,
                     'risk': risk,
                     'summary': summary,
-                    'predicted_price': predicted_price  # Optional, can be displayed in template if needed
+                    'predicted_price': predicted_price
                 }
             except Exception as e:
                 print(f"Llama model inference failed: {e}")
@@ -289,10 +296,19 @@ def index():
     symbol_input = ''
     result = {}
     user_id = request.remote_addr
-    current_tier = r.get(f'user:{user_id}:tier') or b'Free'
-    current_tier = current_tier.decode('utf-8')
+    current_tier = 'Free'
+    request_count = 0
     current_limit = next(tier['limit'] for tier in TIERS if tier['name'] == current_tier)
-    request_count = int(r.get(f'user:{user_id}:request_count') or 0)
+
+    if redis_available:
+        try:
+            current_tier = r.get(f'user:{user_id}:tier') or 'Free'
+            request_count = int(r.get(f'user:{user_id}:request_count') or 0)
+        except redis.RedisError as e:
+            print(f"Redis operation failed: {e}. Using default values.")
+            current_tier = 'Free'
+            request_count = 0
+
     current_tier_name = current_tier
 
     if request.method == 'POST':
@@ -300,12 +316,15 @@ def index():
         symbol_input = symbol
         if not symbol:
             result = {'error': '請輸入股票代號 | Please enter a stock symbol'}
-        elif request_count >= current_limit:
+        elif request_count >= current_limit and redis_available:
             result = {'error': f'已達到 {current_tier} 方案的請求限制 ({current_limit}) | Request limit reached for {current_tier} tier ({current_limit})'}
         else:
             result = get_stock_data(symbol)
-            if 'error' not in result:
-                r.incr(f'user:{user_id}:request_count')
+            if 'error' not in result and redis_available:
+                try:
+                    r.incr(f'user:{user_id}:request_count')
+                except redis.RedisError as e:
+                    print(f"Failed to increment request count: {e}")
 
     return render_template(
         "index.html",
@@ -352,8 +371,12 @@ def success():
         session = stripe.checkout.Session.retrieve(session_id)
         user_id = session.metadata.user_id
         tier = session.metadata.tier
-        r.set(f'user:{user_id}:tier', tier)
-        r.set(f'user:{user_id}:request_count', 0)
+        if redis_available:
+            try:
+                r.set(f'user:{user_id}:tier', tier)
+                r.set(f'user:{user_id}:request_count', 0)
+            except redis.RedisError as e:
+                print(f"Failed to update Redis in success route: {e}")
     except Exception as e:
         print(f"Error in success route: {e}")
     return redirect('/')
@@ -368,8 +391,12 @@ def stripe_webhook():
             session = event['data']['object']
             user_id = session['metadata']['user_id']
             tier = session['metadata']['tier']
-            r.set(f'user:{user_id}:tier', tier)
-            r.set(f'user:{user_id}:request_count', 0)
+            if redis_available:
+                try:
+                    r.set(f'user:{user_id}:tier', tier)
+                    r.set(f'user:{user_id}:request_count', 0)
+                except redis.RedisError as e:
+                    print(f"Failed to update Redis in webhook: {e}")
     except Exception as e:
         print(f"Webhook error: {e}")
         return jsonify({'error': str(e)}), 400
@@ -380,9 +407,13 @@ def reset():
     password = request.form.get('password')
     if password == os.getenv('RESET_PASSWORD'):
         user_id = request.remote_addr
-        r.set(f'user:{user_id}:request_count', 0)
+        if redis_available:
+            try:
+                r.set(f'user:{user_id}:request_count', 0)
+            except redis.RedisError as e:
+                print(f"Failed to reset request count: {e}")
     return redirect('/')
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8080, debug=True)
-
+```
