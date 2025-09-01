@@ -18,9 +18,10 @@
         </div>
     </header>
     <main class="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Stock Analysis Section -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <div class="flex items-center justify-between mb-4">
-                <h2 class="text-lg font-semibold text-gray-700">股票分析</h2>
+                <h2 class="text-lgLG font-semibold text-gray-700">股票分析</h2>
                 <span class="text-sm text-gray-600">
                     當前方案: {{ current_tier_name | default('Free') }} | 請求次數: {{ request_count | default(0) }} / {{ current_limit | default(50) }}
                 </span>
@@ -37,35 +38,17 @@
             </form>
             <h3 class="text-lg font-medium text-gray-700">🏭 產業分類: {{ result.industry_en | default('Unknown') }}</h3>
         </section>
-        <section class="bg-white rounded-lg shadow-md p-6 mb-6">
-            <h2 class="text-lg font-semibold text-gray-700 mb-4">選擇您的方案</h2>
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-                {% for tier in tiers %}
-                <div class="tier-btn">
-                    {% if current_tier_name == tier.name %}
-                    <button type="button" disabled
-                            class="w-full bg-gray-300 text-gray-600 px-4 py-2 rounded-md cursor-not-allowed text-center">
-                        {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests) (已選擇)
-                    </button>
-                    {% else %}
-                    <form class="tierForm" method="POST" action="/create-checkout-session">
-                        <input type="hidden" name="tier" value="{{ tier.name }}">
-                        <button type="submit"
-                                class="w-full bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 transition duration-200 text-center">
-                            {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests)
-                        </button>
-                    </form>
-                    {% endif %}
-                </div>
-                {% endfor %}
-            </div>
-        </section>
+
+        <!-- Error Section -->
         {% if result.error %}
         <section class="bg-red-50 border-l-4 border-red-500 p-4 rounded-md mb-6">
             <p class="text-red-700 font-medium">❌ {{ result.error }}</p>
         </section>
         {% endif %}
+
+        <!-- Result Sections (AI Analysis, Quotes, Financial Metrics, News) -->
         {% if result.symbol %}
+        <!-- AI Analysis Section -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <h3 class="text-lg font-semibold text-gray-700 mb-4">🤖 AI 技術分析與投資建議</h3>
             <div class="border-l-4 border-teal-500 p-4 bg-gray-50 rounded-md space-y-6">
@@ -127,7 +110,7 @@
                     <p class="text-sm text-gray-600">
                         {% if result.gpt_analysis.recommendation is defined and result.gpt_analysis.recommendation is not none %}
                             {% if result.gpt_analysis.recommendation == 'buy' %}
-                            <span class="text-green-600 font-semibold">買入 | Buy:</span> {{ result.gpt_analysis.rationale | default('基於技術指標和市場趨勢，建議買入。 | Based on technical indicators and market trends, a buy is recommended.') }}
+                            <span class="text-green-600 font-semibold">買入 | Buy:</span> {{ result.gpt_analysis.rationale | default('基於技術指標和市場趨勢前期趨勢，建議買入。 | Based on technical indicators and market trends, a buy is recommended.') }}
                             {% elif result.gpt_analysis.recommendation == 'sell' %}
                             <span class="text-red-600 font-semibold">賣出 | Sell:</span> {{ result.gpt_analysis.rationale | default('基於財務挑戰和高估值，建議賣出。 | Based on financial challenges and high valuation, a sell is recommended.') }}
                             {% elif result.gpt_analysis.recommendation == 'hold' %}
@@ -150,6 +133,8 @@
                 <p class="text-xs text-gray-500 mt-4">*以上分析僅供參考，投資有風險 | The above analysis is for reference only; investing involves risks.*</p>
             </div>
         </section>
+
+        <!-- Real-Time Quotes Section -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <h3 class="text-lg font-semibold text-gray-700 mb-4">💰 即時報價</h3>
             <div class="overflow-x-auto">
@@ -171,6 +156,8 @@
                 </table>
             </div>
         </section>
+
+        <!-- Financial Metrics Section -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <h3 class="text-lg font-semibold text-gray-700 mb-4">📊 重要財務指標</h3>
             <div class="overflow-x-auto">
@@ -192,6 +179,8 @@
                 </table>
             </div>
         </section>
+
+        <!-- News Section -->
         {% if result.news is defined and result.news %}
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <h3 class="text-lg font-semibold text-gray-700 mb-4">📰 近10日新聞</h3>
@@ -209,6 +198,33 @@
             </div>
         </section>
         {% endif %}
+
+        <!-- Choose Your Plan Section -->
+        <section class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-lg font-semibold text-gray-700 mb-4">選擇您的方案</h2>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+                {% for tier in tiers %}
+                <div class="tier-btn">
+                    {% if current_tier_name == tier.name %}
+                    <button type="button" disabled
+                            class="w-full bg-gray-300 text-gray-600 px-4 py-2 rounded-md cursor-not-allowed text-center">
+                        {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests) (已選擇)
+                    </button>
+                    {% else %}
+                    <form class="tierForm" method="POST" action="/create-checkout-session">
+                        <input type="hidden" name="tier" value="{{ tier.name }}">
+                        <button type="submit"
+                                class="w-full bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 transition duration-200 text-center">
+                            {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests)
+                        </button>
+                    </form>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+
+        <!-- Reset Request Count Section -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <h2 class="text-lg font-semibold text-gray-700 mb-4">重置請求計數</h2>
             <form class="reset-form" method="POST" action="/reset" class="flex flex-col sm:flex-row gap-4">
@@ -233,4 +249,41 @@
         e.preventDefault();
         const btn = this.querySelector("button[type=submit]");
         const input = document.getElementById("symbolInput");
-        if (!input.value.trim()) { alert("請輸入股票代號
+        if (!input.value.trim()) { alert("請輸入股票代號 / Please enter a stock symbol"); return; }
+        btn.disabled = true; btn.textContent = "處理中... / Processing...";
+        setTimeout(() => this.submit(), 100);
+    });
+    document.querySelectorAll('.tierForm').forEach(form => {
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const btn = this.querySelector('button');
+            const originalText = btn.textContent;
+            btn.disabled = true; btn.textContent = "處理中... / Processing...";
+            fetch(this.action, { method: 'POST', body: new FormData(this) })
+            .then(res => res.json())
+            .then(data => {
+                if (data.url) { window.location.href = data.url; }
+                else { alert(data.error || "Stripe checkout error"); btn.disabled = false; btn.textContent = originalText; }
+            })
+            .catch(err => {
+                console.error(err);
+                alert("Stripe checkout failed"); btn.disabled = false; btn.textContent = originalText;
+            });
+        });
+    });
+    document.querySelector('.reset-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        const btn = this.querySelector('button');
+        const originalText = btn.textContent;
+        btn.disabled = true; btn.textContent = "處理中... / Processing...";
+        fetch(this.action, { method: 'POST', body: new FormData(this) })
+        .then(res => res.text())
+        .then(() => { window.location.reload(); })
+        .catch(err => {
+            console.error(err);
+            alert("Reset failed"); btn.disabled = false; btn.textContent = originalText;
+        });
+    });
+    </script>
+</body>
+</html>
