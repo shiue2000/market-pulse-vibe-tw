@@ -12,7 +12,7 @@ import numpy as np
 import logging
 import plotly.express as px
 import pandas as pd
-from openai import OpenAI
+from openai import OpenAI, AuthenticationError, RateLimitError, APIError
 
 # Ensure NumPy version is <2.0 for compatibility
 assert np.__version__.startswith("1."), "NumPy version must be <2.0"
@@ -463,8 +463,13 @@ def get_historical_data(symbol):
 
 def get_plot_html(df, symbol):
     if df.empty:
+        logger.warning(f"No data to plot for {symbol}")
         return ""
     try:
+        # Validate DataFrame
+        if not all(df['date'].notna()) or not all(df['close'].apply(lambda x: isinstance(x, (int, float)))):
+            logger.error(f"Invalid data in DataFrame for {symbol}: {df.head().to_dict()}")
+            return ""
         fig = px.line(df, x='date', y='close', title=f"{symbol} Stock Price")
         fig.update_layout(xaxis_title="Date", yaxis_title="Price (TWD)")
         return fig.to_html(full_html=False)
@@ -498,31 +503,39 @@ def get_stock_data(symbol):
     
     logger.info(f"Processing stock data for symbol: {symbol}")
     try:
+        logger.info(f"Step 1: Fetching stock name for {symbol}")
         stock_name = get_stock_name(symbol)
         logger.info(f"Stock name resolved: {stock_name}")
         
+        logger.info(f"Step 2: Fetching quote for {symbol}")
         quote = get_quote(symbol)
         if 'error' in quote:
             logger.error(f"Quote fetch failed: {quote['error']}")
             return quote
         
+        logger.info(f"Step 3: Fetching metrics for {symbol}")
         metrics = filter_metrics(get_metrics(symbol))
         logger.info(f"Metrics fetched: {metrics}")
         
+        logger.info(f"Step 4: Fetching news for {symbol}")
         news = get_recent_news(symbol)
         logger.info(f"News fetched: {len(news)} items")
         
+        logger.info(f"Step 5: Fetching company profile for {symbol}")
         profile = get_company_profile(symbol)
         industry_en = profile.get("finnhubIndustry", "Unknown")
         industry_zh = industry_mapping.get(industry_en, "未知")
         logger.info(f"Industry: {industry_zh} ({industry_en})")
         
+        logger.info(f"Step 6: Fetching historical data for {symbol}")
         df, technical = get_historical_data(symbol)
         logger.info(f"Historical data fetched, dataframe shape: {df.shape}, technical: {technical}")
         
+        logger.info(f"Step 7: Generating plot for {symbol}")
         plot_html = get_plot_html(df, symbol)
         logger.info(f"Plot HTML generated: {'Yes' if plot_html else 'No'}")
         
+        logger.info(f"Step 8: Preparing OpenAI prompt for {symbol}")
         # Ensure technical values are strings to avoid formatting issues
         technical_str = ", ".join(f"{k.upper()}: {str(v)}" for k, v in technical.items())
         # Convert metrics to a safe string representation
@@ -549,29 +562,38 @@ def get_stock_data(symbol):
             "summary": "中文 summary\\nEnglish summary"
         }}
         """
-        logger.info(f"OpenAI prompt prepared for {symbol}")
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "你是一位中英雙語金融分析助理，中英文內容完全對等。請以JSON格式回應，確保結構一致且無錯誤。"},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=999,
-            temperature=0.6,
-            response_format={"type": "json_object"}
-        )
+        logger.info(f"Step 9: Calling OpenAI API for {symbol}")
         try:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "你是一位中英雙語金融分析助理，中英文內容完全對等。請以JSON格式回應，確保結構一致且無錯誤。"},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=999,
+                temperature=0.6,
+                response_format={"type": "json_object"}
+            )
             gpt_analysis = json.loads(response.choices[0].message.content)
             logger.info(f"OpenAI analysis successful for {symbol}: {gpt_analysis}")
-        except Exception as e:
-            logger.error(f"Failed to parse OpenAI response for {symbol}: {e}")
+        except (AuthenticationError, RateLimitError, APIError) as e:
+            logger.error(f"OpenAI API error for {symbol}: {e}")
             gpt_analysis = {
                 'recommendation': 'hold',
-                'rationale': '分析失敗，採用後備邏輯。\nAnalysis failed, using fallback logic.',
+                'rationale': f'OpenAI API 錯誤，採用後備邏輯: {str(e)}。\nOpenAI API error, using fallback logic: {str(e)}.',
+                'risk': '中等風險，需密切關注市場動態。\nModerate risk, monitor market dynamics closely.',
+                'summary': '由於OpenAI API失敗，建議謹慎並持續關注市場。\nDue to OpenAI API failure, exercise caution and monitor market trends.'
+            }
+        except Exception as e:
+            logger.error(f"Unexpected OpenAI error for {symbol}: {e}")
+            gpt_analysis = {
+                'recommendation': 'hold',
+                'rationale': f'分析失敗，採用後備邏輯: {str(e)}。\nAnalysis failed, using fallback logic: {str(e)}.',
                 'risk': '中等風險，需密切關注市場動態。\nModerate risk, monitor market dynamics closely.',
                 'summary': '由於分析失敗，建議謹慎並持續關注市場。\nDue to analysis failure, exercise caution and monitor market trends.'
             }
         
+        logger.info(f"Step 10: Returning stock data for {symbol}")
         return {
             'symbol': symbol,
             'stock_name': stock_name,
@@ -588,6 +610,13 @@ def get_stock_data(symbol):
     except Exception as e:
         logger.error(f"Error fetching stock data for {symbol}: {e}")
         return {'error': f'無法獲取股票 {symbol} 的數據: {str(e)} | Failed to fetch data for {symbol}: {str(e)}'}
+
+@app.errorhandler(Exception)
+def handle_error(error):
+    logger.error(f"Internal server error: {str(error)}")
+    return jsonify({
+        'error': f'伺服器內部錯誤: {str(error)} | Internal server error: {str(error)}'
+    }), 500
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
