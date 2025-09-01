@@ -90,7 +90,8 @@ if not FINNHUB_API_KEY:
 STATIC_STOCK_NAMES = {
     '2330': '台積電 | Taiwan Semiconductor Manufacturing',
     '2317': '鴻海精密 | Hon Hai Precision',
-    '2454': '聯發科 | MediaTek'
+    '2454': '聯發科 | MediaTek',
+    '2382': '廣達電腦 | Quanta Computer'
 }
 
 # Expanded industry mapping
@@ -355,6 +356,12 @@ def get_finnhub_json(endpoint, params):
             response = r.json()
             logger.info(f"Finnhub API success for {endpoint}, params: {params}, response: {response}")
             return response
+        except requests.HTTPError as e:
+            if r.status_code == 403:
+                logger.error(f"Finnhub API forbidden (403) for {endpoint}, likely invalid or restricted API key: {e}")
+            else:
+                logger.warning(f"Finnhub API failed for {endpoint}, attempt {attempt + 1}: {e}")
+            time.sleep(2)
         except Exception as e:
             logger.warning(f"Finnhub API failed for {endpoint}, attempt {attempt + 1}: {e}")
             time.sleep(2)
