@@ -7,3 +7,4 @@ pandas==1.5.3
 plotly==5.10.0
 openai==1.10.0
 flask-wtf==1.0.1
+flake8
