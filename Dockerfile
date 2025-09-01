@@ -1,11 +1,11 @@
+# Use a lightweight Python base image
 FROM python:3.10-slim
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies for Redis, Python, and Llama model
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    redis-tools \
     build-essential \
     libffi-dev \
     libssl-dev \
@@ -24,10 +24,8 @@ COPY templates/index.html templates/index.html
 # Expose port for Flask app
 EXPOSE 8080
 
-# Set environment variables (optional, can be overridden in docker-compose.yml)
-ENV FLASK_APP=app.py
-ENV FLASK_ENV=development
-
+# Command to run the Flask app with Gunicorn for Railway
+# CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app"]
 COPY templates /app/templates
 
 CMD ["python", "app.py"]
