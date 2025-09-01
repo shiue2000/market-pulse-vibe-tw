@@ -1,4 +1,3 @@
-```python
 import os
 from datetime import datetime, timedelta
 from flask import Flask, request, render_template, jsonify, redirect
@@ -416,4 +415,4 @@ def reset():
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8080, debug=True)
-```
+
