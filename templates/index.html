@@ -21,7 +21,7 @@
         <!-- Stock Analysis Section -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <div class="flex items-center justify-between mb-4">
-                <h2 class="text-lgLG font-semibold text-gray-700">股票分析</h2>
+                <h2 class="text-lg font-semibold text-gray-700">股票分析</h2>
                 <span class="text-sm text-gray-600">
                     當前方案: {{ current_tier_name | default('Free') }} | 請求次數: {{ request_count | default(0) }} / {{ current_limit | default(50) }}
                 </span>
@@ -46,7 +46,7 @@
         </section>
         {% endif %}
 
-        <!-- Result Sections (AI Analysis, Quotes, Financial Metrics, News) -->
+        <!-- Result Sections -->
         {% if result.symbol %}
         <!-- AI Analysis Section -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
@@ -59,11 +59,9 @@
                         <span class="font-semibold">目前價格 | Current Price:</span> {{ result.quote.current_price | default('N/A') }}<br>
                         <span class="font-semibold">當日變化 | Daily Change:</span>
                         {% if result.quote.daily_change is defined and result.quote.daily_change is not none %}
-                            {% if result.quote.daily_change > 0 %}
-                            <span class="text-green-600">+{{ result.quote.daily_change | round(2) }}%</span>
-                            {% else %}
-                            <span class="text-red-600">{{ result.quote.daily_change | round(2) }}%</span>
-                            {% endif %}
+                            <span class="{% if result.quote.daily_change > 0 %}text-green-600{% else %}text-red-600{% endif %}">
+                                {{ result.quote.daily_change | round(2) }}%
+                            </span>
                         {% else %}
                             N/A
                         {% endif %}<br>
@@ -76,21 +74,17 @@
                         <span class="font-semibold">50日移動平均線 | 50-Day MA:</span> {{ result.technical.ma50 | default('N/A') }}<br>
                         <span class="font-semibold">相對強弱指數 (RSI) | RSI:</span> {{ result.technical.rsi | default('N/A') }}
                         {% if result.technical.rsi is defined and result.technical.rsi is not none %}
-                            {% if result.technical.rsi > 70 %}
-                            <span class="text-red-600">(超買 | Overbought)</span>
-                            {% elif result.technical.rsi < 30 %}
-                            <span class="text-green-600">(超賣 | Oversold)</span>
-                            {% else %}
-                            <span class="text-gray-600">(中性 | Neutral)</span>
-                            {% endif %}
+                            <span class="{% if result.technical.rsi > 70 %}text-red-600{% elif result.technical.rsi < 30 %}text-green-600{% else %}text-gray-600{% endif %}">
+                                {% if result.technical.rsi > 70 %}(超買 | Overbought)
+                                {% elif result.technical.rsi < 30 %}(超賣 | Oversold)
+                                {% else %}(中性 | Neutral){% endif %}
+                            </span>
                         {% endif %}<br>
                         <span class="font-semibold">MACD:</span> {{ result.technical.macd | default('N/A') }}
                         {% if result.technical.macd is defined and result.technical.macd is not none %}
-                            {% if result.technical.macd > 0 %}
-                            <span class="text-green-600">(看漲 | Bullish)</span>
-                            {% else %}
-                            <span class="text-red-600">(看跌 | Bearish)</span>
-                            {% endif %}
+                            <span class="{% if result.technical.macd > 0 %}text-green-600{% else %}text-red-600{% endif %}">
+                                {% if result.technical.macd > 0 %}(看漲 | Bullish){% else %}(看跌 | Bearish){% endif %}
+                            </span>
                         {% endif %}<br>
                         <span class="font-semibold">支撐位 | Support Level:</span> {{ result.technical.support | default('N/A') }}<br>
                         <span class="font-semibold">阻力位 | Resistance Level:</span> {{ result.technical.resistance | default('N/A') }}
@@ -99,29 +93,35 @@
                 <div>
                     <h4 class="text-base font-medium text-gray-800">財務健康 | Financial Health</h4>
                     <p class="text-sm text-gray-600">
-                        <span class="font-semibold">市盈率 (PE TTM) | PE Ratio (TTM):</span> {{ result.metrics.pe_ratio | default('N/A') }}<br>
-                        <span class="font-semibold">市淨率 (PB) | PB Ratio:</span> {{ result.metrics.pb_ratio | default('N/A') }}<br>
-                        <span class="font-semibold">收入增長 (YoY) | Revenue Growth (YoY):</span> {{ result.metrics.revenue_growth | default('N/A') }}<br>
-                        <span class="font-semibold">每股盈利增長 (YoY) | EPS Growth (YoY):</span> {{ result.metrics.eps_growth | default('N/A') }}
+                        <span class="font-semibold">本益比 (PE TTM) | PE Ratio (TTM):</span> {{ result.metrics.pe | default('N/A') }}<br>
+                        <span class="font-semibold">股價淨值比 (PB) | PB Ratio:</span> {{ result.metrics.pb | default('N/A') }}<br>
+                        <span class="font-semibold">營收成長率 (YoY) | Revenue Growth (YoY):</span> {{ result.metrics.revenue_growth | default('N/A') }}<br>
+                        <span class="font-semibold">每股盈餘成長率 (YoY) | EPS Growth (YoY):</span> {{ result.metrics.eps_growth | default('N/A') }}
                     </p>
                 </div>
                 <div>
                     <h4 class="text-base font-medium text-gray-800">投資建議 | Investment Recommendation</h4>
                     <p class="text-sm text-gray-600">
-                        {% if result.gpt_analysis.recommendation is defined and result.gpt_analysis.recommendation is not none %}
-                            {% if result.gpt_analysis.recommendation == 'buy' %}
-                            <span class="text-green-600 font-semibold">買入 | Buy:</span> {{ result.gpt_analysis.rationale | default('基於技術指標和市場趨勢前期趨勢，建議買入。 | Based on technical indicators and market trends, a buy is recommended.') }}
-                            {% elif result.gpt_analysis.recommendation == 'sell' %}
-                            <span class="text-red-600 font-semibold">賣出 | Sell:</span> {{ result.gpt_analysis.rationale | default('基於財務挑戰和高估值，建議賣出。 | Based on financial challenges and high valuation, a sell is recommended.') }}
-                            {% elif result.gpt_analysis.recommendation == 'hold' %}
-                            <span class="text-yellow-600 font-semibold">持有 | Hold:</span> {{ result.gpt_analysis.rationale | default('當前市場條件不明朗，建議持有觀望。 | Current market conditions are unclear, a hold is recommended.') }}
-                            {% endif %}
+                        {% set recommendation = result.gpt_analysis.recommendation | default(None) %}
+                        {% if recommendation %}
+                            <span class="{% if recommendation == 'buy' %}text-green-600{% elif recommendation == 'sell' %}text-red-600{% else %}text-yellow-600{% endif %} font-semibold">
+                                {% if recommendation == 'buy' %}買入 | Buy
+                                {% elif recommendation == 'sell' %}賣出 | Sell
+                                {% else %}持有 | Hold{% endif %}:
+                            </span>
+                            {{ result.gpt_analysis.rationale | default({
+                                'buy': '基於技術指標和市場趨勢，建議買入。 | Based on technical indicators and market trends, a buy is recommended.',
+                                'sell': '基於財務挑戰和高估值，建議賣出。 | Based on financial challenges and high valuation, a sell is recommended.',
+                                'hold': '當前市場條件不明朗，建議持有觀望。 | Current market conditions are unclear, a hold is recommended.'
+                            }[recommendation]) }}
                         {% else %}
-                            <span class="text-gray-600">無明確建議 | No Clear Recommendation:</span> {{ result.gpt_analysis | default('無法取得 AI 回應 | Unable to obtain AI response') | safe }}
+                            <span class="text-gray-600">無明確建議 | No Clear Recommendation:</span>
+                            {{ result.gpt_analysis | default('無法取得 AI 回應 | Unable to obtain AI response') | safe }}
                         {% endif %}
                     </p>
                     <p class="text-sm text-gray-600 mt-2">
-                        <span class="font-semibold">風險評估 | Risk Assessment:</span> {{ result.gpt_analysis.risk | default('中等風險，建議密切監控市場動態。 | Moderate risk, monitor market dynamics closely.') }}
+                        <span class="font-semibold">風險評估 | Risk Assessment:</span>
+                        {{ result.gpt_analysis.risk | default('中等風險，建議密切監控市場動態。 | Moderate risk, monitor market dynamics closely.') }}
                     </p>
                 </div>
                 <div>
