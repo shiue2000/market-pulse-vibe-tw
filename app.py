@@ -1,6 +1,7 @@
 import os
-from datetime import datetime, timedelta
-from flask import Flask, request, render_template, jsonify, redirect
+import datetime
+import requests
+from flask import Flask, request, render_template, jsonify, redirect, session, flash
 import stripe
 import yfinance as yf
 import pandas as pd
@@ -9,15 +10,43 @@ from ta.momentum import RSIIndicator
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, BitsAndBytesConfig
 from peft import PeftModel
+import logging
 
 app = Flask(__name__)
+app.secret_key = os.getenv('SECRET_KEY', 'supersecretkey')
 
-# In-memory storage for user tiers and request counts
-user_data = {}
+# Logger setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Stripe setup
-stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
+STRIPE_TEST_SECRET_KEY = os.getenv('STRIPE_TEST_SECRET_KEY')
+STRIPE_TEST_PUBLISHABLE_KEY = os.getenv('STRIPE_TEST_PUBLISHABLE_KEY')
+STRIPE_LIVE_SECRET_KEY = os.getenv('STRIPE_LIVE_SECRET_KEY')
+STRIPE_LIVE_PUBLISHABLE_KEY = os.getenv('STRIPE_LIVE_PUBLISHABLE_KEY')
+STRIPE_MODE = os.getenv('STRIPE_MODE', 'test').lower()
+STRIPE_PRICE_IDS = {
+    'Free': os.getenv('STRIPE_PRICE_TIER0'),
+    'Basic': os.getenv('STRIPE_PRICE_TIER1'),
+    'Pro': os.getenv('STRIPE_PRICE_TIER2'),
+    'Premium': os.getenv('STRIPE_PRICE_TIER3'),
+    'Enterprise': os.getenv('STRIPE_PRICE_TIER4'),
+}
 ENDPOINT_SECRET = os.getenv('STRIPE_ENDPOINT_SECRET')
+
+if STRIPE_MODE == 'live':
+    STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
+    STRIPE_PUBLISHABLE_KEY = STRIPE_LIVE_PUBLISHABLE_KEY
+else:
+    STRIPE_SECRET_KEY = STRIPE_TEST_SECRET_KEY
+    STRIPE_PUBLISHABLE_KEY = STRIPE_TEST_PUBLISHABLE_KEY
+
+if not STRIPE_SECRET_KEY or not STRIPE_PUBLISHABLE_KEY:
+    raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in .env")
+stripe.api_key = STRIPE_SECRET_KEY
+
+# In-memory storage for user data
+user_data = {}
 
 # Constants
 QUOTE_FIELDS = {
@@ -37,13 +66,16 @@ METRIC_NAMES_ZH_EN = {
     'eps_growth': '每股盈餘成長率 (YoY) | EPS Growth (YoY)'
 }
 
-TIERS = [
-    {'name': 'Free', 'price': 0, 'limit': 50},
-    {'name': 'Basic', 'price': 5, 'limit': 200},
-    {'name': 'Pro', 'price': 10, 'limit': 500},
-    {'name': 'Premium', 'price': 20, 'limit': 1000},
-    {'name': 'Enterprise', 'price': 50, 'limit': 3000}
+PRICING_TIERS = [
+    {'name': 'Free', 'limit': 50, 'price': 0},
+    {'name': 'Basic', 'limit': 200, 'price': 5},
+    {'name': 'Pro', 'limit': 500, 'price': 10},
+    {'name': 'Premium', 'limit': 1000, 'price': 20},
+    {'name': 'Enterprise', 'limit': 3000, 'price': 50}
 ]
+
+# Finnhub setup
+FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
 
 # Initialize Llama 3 8B model with QLoRA
 def initialize_llama_model():
@@ -85,13 +117,39 @@ def initialize_llama_model():
 
         return text_gen_pipeline, tokenizer
     except Exception as e:
-        print(f"Failed to initialize Llama model: {e}")
+        logger.error(f"Failed to initialize Llama model: {e}")
         return None, None
 
 llama_pipeline, llama_tokenizer = initialize_llama_model()
 
+def get_finnhub_json(endpoint, params):
+    url = f"https://finnhub.io/api/v1/{endpoint}"
+    params["token"] = FINNHUB_API_KEY
+    for _ in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=5)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            logger.warning(f"[Finnhub Error] {endpoint}: {e}")
+            time.sleep(2)
+    return {}
+
+def get_recent_news(symbol):
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    past = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
+    news = get_finnhub_json("company-news", {"symbol": f"{symbol}.TW", "from": past, "to": today})
+    if not isinstance(news, list):
+        return []
+    news = sorted(news, key=lambda x: x.get("datetime", 0), reverse=True)[:10]
+    for n in news:
+        try:
+            n["datetime"] = datetime.datetime.utcfromtimestamp(n["datetime"]).strftime("%Y-%m-%d %H:%M")
+        except:
+            n["datetime"] = "未知時間 | Unknown time"
+    return news
+
 def get_stock_data(symbol):
-    # Validate stock ID: must be a 4-digit number
     if not symbol.isdigit() or len(symbol) != 4:
         return {'error': '股票代號必須為4位數字 | Stock ID must be a 4-digit number'}
 
@@ -162,7 +220,7 @@ def get_stock_data(symbol):
                     'summary': summary
                 }
 
-            last_trading_day = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            last_trading_day = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y-%m-%d')
             messages = [
                 {
                     "role": "system",
@@ -237,7 +295,7 @@ def get_stock_data(symbol):
                     'predicted_price': predicted_price
                 }
             except Exception as e:
-                print(f"Llama model inference failed: {e}")
+                logger.error(f"Llama model inference failed: {e}")
                 recommendation = 'hold'
                 rationale = '模型推斷失敗，採用後備邏輯。 | Model inference failed, using fallback logic.'
                 risk = '中等風險，需密切關注市場動態。 | Moderate risk, monitor market dynamics closely.'
@@ -262,6 +320,7 @@ def get_stock_data(symbol):
                 }
 
         gpt_analysis = analyze_stock(quote, technical, metrics)
+        news = get_recent_news(symbol)
 
         return {
             'symbol': symbol,
@@ -270,10 +329,11 @@ def get_stock_data(symbol):
             'metrics': metrics,
             'gpt_analysis': gpt_analysis,
             'industry_en': info.get('industry', 'Unknown'),
-            'news': []  # yfinance does not provide news; use Finnhub or other API for news
+            'news': news
         }
 
     except Exception as e:
+        logger.error(f"Error fetching stock data for {symbol}: {e}")
         return {'error': f'無法獲取股票 {symbol} 的數據: {str(e)} | Failed to fetch data for {symbol}: {str(e)}'}
 
 @app.route('/', methods=['GET', 'POST'])
@@ -281,9 +341,11 @@ def index():
     symbol_input = ''
     result = {}
     user_id = request.remote_addr
-    current_tier = user_data.get(f'user:{user_id}:tier', 'Free')
-    request_count = user_data.get(f'user:{user_id}:request_count', 0)
-    current_limit = next(tier['limit'] for tier in TIERS if tier['name'] == current_tier)
+    current_tier_index = session.get('paid_tier', 0)
+    current_tier = PRICING_TIERS[current_tier_index]
+    current_tier_name = current_tier['name']
+    request_count = session.get('request_count', user_data.get(f'user:{user_id}:request_count', 0))
+    current_limit = current_tier['limit']
 
     if request.method == 'POST':
         symbol = request.form.get('symbol', '').strip()
@@ -291,62 +353,80 @@ def index():
         if not symbol:
             result = {'error': '請輸入股票代號 | Please enter a stock symbol'}
         elif request_count >= current_limit:
-            result = {'error': f'已達到 {current_tier} 方案的請求限制 ({current_limit}) | Request limit reached for {current_tier} tier ({current_limit})'}
+            result = {'error': f'已達到 {current_tier_name} 方案的請求限制 ({current_limit}) | Request limit reached for {current_tier_name} tier ({current_limit})'}
         else:
             result = get_stock_data(symbol)
             if 'error' not in result:
-                user_data[f'user:{user_id}:request_count'] = request_count + 1
+                session['request_count'] = request_count + 1
+                user_data[f'user:{user_id}:request_count'] = session['request_count']
 
     return render_template(
-        "index.html",
+        'index.html',
         symbol_input=symbol_input,
         result=result,
-        current_tier_name=current_tier,
+        current_tier_name=current_tier_name,
         request_count=request_count,
         current_limit=current_limit,
         QUOTE_FIELDS=QUOTE_FIELDS,
         METRIC_NAMES_ZH_EN=METRIC_NAMES_ZH_EN,
-        tiers=TIERS
+        tiers=PRICING_TIERS,
+        stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
+        stripe_mode=STRIPE_MODE
     )
 
 @app.route('/create-checkout-session', methods=['POST'])
 def create_checkout_session():
-    tier = request.form.get('tier')
-    selected_tier = next((t for t in TIERS if t['name'] == tier), None)
-    if not selected_tier or selected_tier['price'] == 0:
-        return jsonify({'error': '無效的方案 | Invalid tier'})
+    tier_name = request.form.get('tier')
+    tier = next((t for t in PRICING_TIERS if t['name'] == tier_name), None)
+    if not tier:
+        logger.error(f"Invalid tier requested: {tier_name}")
+        return jsonify({'error': '無效的方案 | Invalid tier'}), 400
+
+    if tier['name'] == 'Free':
+        session['subscribed'] = False
+        session['paid_tier'] = 0
+        session['request_count'] = 0
+        user_data[f'user:{request.remote_addr}:tier'] = 'Free'
+        user_data[f'user:{request.remote_addr}:request_count'] = 0
+        flash('✅ 已切換到免費方案 | Switched to Free tier.', 'success')
+        return jsonify({'url': url_for('index', _external=True)})
+
+    price_id = STRIPE_PRICE_IDS.get(tier_name)
+    if not price_id:
+        logger.error(f"No valid Price ID configured for {tier_name}")
+        flash(f'⚠️ {tier_name} 方案目前不可用 | Subscription for {tier_name} is currently unavailable.', 'warning')
+        return jsonify({'error': f'{tier_name} 方案目前不可用 | Subscription for {tier_name} is currently unavailable'}), 400
+
     try:
+        logger.info(f"Creating Stripe checkout session for {tier_name} with Price ID: {price_id}")
         checkout_session = stripe.checkout.Session.create(
             payment_method_types=['card'],
             line_items=[{
-                'price_data': {
-                    'currency': 'usd',
-                    'product_data': {'name': f'{tier} Tier'},
-                    'unit_amount': selected_tier['price'] * 100,
-                },
+                'price': price_id,
                 'quantity': 1,
             }],
             mode='subscription',
-            success_url='https://your-app.railway.app/success?session_id={CHECKOUT_SESSION_ID}',
-            cancel_url='https://your-app.railway.app/',
-            metadata={'tier': tier, 'user_id': request.remote_addr}
+            success_url=url_for('payment_success', tier_name=tier_name, _external=True),
+            cancel_url=url_for('index', _external=True),
+            metadata={'tier': tier_name, 'user_id': request.remote_addr}
         )
         return jsonify({'url': checkout_session.url})
     except Exception as e:
-        return jsonify({'error': str(e)})
+        logger.error(f"Unexpected Stripe error: {e}")
+        return jsonify({'error': f'無法創建結帳會話: {str(e)} | Failed to create checkout session: {str(e)}'}), 500
 
-@app.route('/success')
-def success():
-    session_id = request.args.get('session_id')
-    try:
-        session = stripe.checkout.Session.retrieve(session_id)
-        user_id = session.metadata.user_id
-        tier = session.metadata.tier
-        user_data[f'user:{user_id}:tier'] = tier
-        user_data[f'user:{user_id}:request_count'] = 0
-    except Exception as e:
-        print(f"Error in success route: {e}")
-    return redirect('/')
+@app.route('/payment-success/<tier_name>')
+def payment_success(tier_name):
+    tier_index = next((i for i, t in enumerate(PRICING_TIERS) if t['name'] == tier_name), None)
+    if tier_index is not None and tier_name != 'Free':
+        session['subscribed'] = True
+        session['paid_tier'] = tier_index
+        session['request_count'] = 0
+        user_data[f'user:{request.remote_addr}:tier'] = tier_name
+        user_data[f'user:{request.remote_addr}:request_count'] = 0
+        flash(f'✅ 成功訂閱 {tier_name} 方案 | Subscription successful for {tier_name} plan.', 'success')
+        logger.info(f"Subscription successful for {tier_name} (tier index: {tier_index})")
+    return redirect(url_for('index'))
 
 @app.route('/webhook', methods=['POST'])
 def stripe_webhook():
@@ -355,13 +435,19 @@ def stripe_webhook():
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, ENDPOINT_SECRET)
         if event['type'] == 'checkout.session.completed':
-            session = event['data']['object']
-            user_id = session['metadata']['user_id']
-            tier = session['metadata']['tier']
-            user_data[f'user:{user_id}:tier'] = tier
-            user_data[f'user:{user_id}:request_count'] = 0
+            stripe_session = event['data']['object']
+            user_id = stripe_session['metadata']['user_id']
+            tier = stripe_session['metadata']['tier']
+            tier_index = next((i for i, t in enumerate(PRICING_TIERS) if t['name'] == tier), None)
+            if tier_index is not None:
+                session['subscribed'] = True
+                session['paid_tier'] = tier_index
+                session['request_count'] = 0
+                user_data[f'user:{user_id}:tier'] = tier
+                user_data[f'user:{user_id}:request_count'] = 0
+                logger.info(f"Webhook: Updated {user_id} to {tier} tier")
     except Exception as e:
-        print(f"Webhook error: {e}")
+        logger.error(f"Webhook error: {e}")
         return jsonify({'error': str(e)}), 400
     return jsonify({'status': 'success'})
 
@@ -370,8 +456,17 @@ def reset():
     password = request.form.get('password')
     if password == os.getenv('RESET_PASSWORD'):
         user_id = request.remote_addr
+        session['request_count'] = 0
+        session['subscribed'] = False
+        session['paid_tier'] = 0
         user_data[f'user:{user_id}:request_count'] = 0
-    return redirect('/')
+        user_data[f'user:{user_id}:tier'] = 'Free'
+        flash('✅ 請求次數已重置 | Request count reset.', 'success')
+        logger.info(f"Reset request count for user {user_id}")
+    else:
+        flash('❌ 密碼錯誤 | Incorrect password.', 'danger')
+        logger.warning('Failed reset attempt with incorrect password')
+    return redirect(url_for('index'))
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=int(os.getenv('PORT', 8080)))
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)))
