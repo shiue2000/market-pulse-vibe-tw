@@ -93,7 +93,8 @@
                     <div>
                         <h4 class="text-base font-medium text-gray-800">即時市場概覽 | Real-Time Market Overview</h4>
                         <p class="text-sm text-gray-600">
-                            <span class="font-semibold">股票代號 | Stock Symbol:</span> {{ result.symbol }}<br>
+                            <span class="font-semibold">股票名稱 | Stock Name:</span> {{ result.stock_name | default('Unknown') }}<br>
+                            <span class="font-semibold">股票代號 | Stock Symbol:</span> {{ result.symbol }} ({{ result.market | default('上市') }})<br>
                             <span class="font-semibold">目前價格 | Current Price:</span> {{ result.quote.current_price | default('N/A') }}<br>
                             <span class="font-semibold">當日變化 | Daily Change:</span> 
                             {% if result.quote.daily_change is defined and result.quote.daily_change is not none %}
