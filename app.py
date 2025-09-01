@@ -2,7 +2,6 @@ import os
 from datetime import datetime, timedelta
 from flask import Flask, request, render_template, jsonify, redirect
 import stripe
-import redis
 import yfinance as yf
 import pandas as pd
 from ta.trend import SMAIndicator, MACD
@@ -13,15 +12,8 @@ from peft import PeftModel
 
 app = Flask(__name__)
 
-# Redis setup with error handling
-try:
-    r = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
-    r.ping()  # Test connection
-    redis_available = True
-except redis.ConnectionError as e:
-    print(f"Redis connection failed: {e}. Falling back to default values.")
-    redis_available = False
-    r = None
+# In-memory storage for user tiers and request counts
+user_data = {}
 
 # Stripe setup
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
@@ -99,16 +91,18 @@ def initialize_llama_model():
 llama_pipeline, llama_tokenizer = initialize_llama_model()
 
 def get_stock_data(symbol):
+    # Validate stock ID: must be a 4-digit number
+    if not symbol.isdigit() or len(symbol) != 4:
+        return {'error': '股票代號必須為4位數字 | Stock ID must be a 4-digit number'}
+
     try:
-        # Append .TW for Taiwan stocks
         ticker = yf.Ticker(f"{symbol}.TW")
         info = ticker.info
-        history = ticker.history(period="3mo")  # 3 months for technical analysis
+        history = ticker.history(period="3mo")
 
         if history.empty or not info:
             return {'error': f'無法獲取股票 {symbol} 的數據 | No data available for {symbol}'}
 
-        # Quote data
         current_price = history['Close'][-1] if not history['Close'].empty else None
         prev_close = history['Close'][-2] if len(history['Close']) >= 2 else None
         daily_change = ((current_price - prev_close) / prev_close * 100) if current_price and prev_close else None
@@ -123,7 +117,6 @@ def get_stock_data(symbol):
             'prev_close': round(prev_close, 2) if prev_close else 'N/A'
         }
 
-        # Technical indicators
         sma50 = SMAIndicator(history['Close'], window=50).sma_indicator()
         rsi = RSIIndicator(history['Close'], window=14).rsi()
         macd = MACD(history['Close'], window_slow=26, window_fast=12, window_sign=9)
@@ -137,7 +130,6 @@ def get_stock_data(symbol):
             'resistance': round(history['High'][-50:].max(), 2) if not history['High'].empty else 'N/A'
         }
 
-        # Financial metrics
         metrics = {
             'pe': round(info.get('trailingPE', 'N/A'), 2) if info.get('trailingPE') else 'N/A',
             'pb': round(info.get('priceToBook', 'N/A'), 2) if info.get('priceToBook') else 'N/A',
@@ -145,10 +137,8 @@ def get_stock_data(symbol):
             'eps_growth': round(info.get('earningsGrowth', 'N/A'), 2) if info.get('earningsGrowth') else 'N/A'
         }
 
-        # AI analysis using Llama 3 8B QLoRA
         def analyze_stock(quote, technical, metrics):
             if llama_pipeline is None or llama_tokenizer is None:
-                # Fallback to rule-based logic if Llama model fails to load
                 recommendation = 'hold'
                 rationale = '由於目前缺乏關鍵的財務和技術指標數據，無法確定該股票的具體價值和趨勢，因此建議持有觀望。 | Due to the lack of key financial and technical indicator data, it is difficult to determine the specific value and trend of this stock, thus a hold recommendation is advised.'
                 risk = '缺乏數據可能導致投資決策的不確定性，投資者需謹慎評估。 | The lack of data may lead to uncertainty in investment decisions, and investors should assess carefully.'
@@ -172,7 +162,6 @@ def get_stock_data(symbol):
                     'summary': summary
                 }
 
-            # Prepare input for Llama model
             last_trading_day = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
             messages = [
                 {
@@ -215,14 +204,12 @@ def get_stock_data(symbol):
                 )
                 generated_text = outputs[0]["generated_text"][len(prompt):].strip()
 
-                # Parse the generated text (assuming model outputs structured response)
                 recommendation = 'hold'
                 rationale = '模型未提供明確建議。 | Model did not provide a clear recommendation.'
                 risk = '中等風險，需密切關注市場動態。 | Moderate risk, monitor market dynamics closely.'
                 summary = '根據模型分析，投資決策應謹慎，持續關注市場變化。 | Based on model analysis, investment decisions should be cautious, with ongoing market monitoring.'
                 predicted_price = 'N/A'
 
-                # Simple parsing logic (adjust based on actual model output format)
                 for line in generated_text.split('\n'):
                     line = line.strip()
                     if line.startswith('預測收盤價:') or line.startswith('Predicted Close:'):
@@ -251,7 +238,6 @@ def get_stock_data(symbol):
                 }
             except Exception as e:
                 print(f"Llama model inference failed: {e}")
-                # Fallback to rule-based logic
                 recommendation = 'hold'
                 rationale = '模型推斷失敗，採用後備邏輯。 | Model inference failed, using fallback logic.'
                 risk = '中等風險，需密切關注市場動態。 | Moderate risk, monitor market dynamics closely.'
@@ -295,41 +281,27 @@ def index():
     symbol_input = ''
     result = {}
     user_id = request.remote_addr
-    current_tier = 'Free'
-    request_count = 0
+    current_tier = user_data.get(f'user:{user_id}:tier', 'Free')
+    request_count = user_data.get(f'user:{user_id}:request_count', 0)
     current_limit = next(tier['limit'] for tier in TIERS if tier['name'] == current_tier)
-
-    if redis_available:
-        try:
-            current_tier = r.get(f'user:{user_id}:tier') or 'Free'
-            request_count = int(r.get(f'user:{user_id}:request_count') or 0)
-        except redis.RedisError as e:
-            print(f"Redis operation failed: {e}. Using default values.")
-            current_tier = 'Free'
-            request_count = 0
-
-    current_tier_name = current_tier
 
     if request.method == 'POST':
         symbol = request.form.get('symbol', '').strip()
         symbol_input = symbol
         if not symbol:
             result = {'error': '請輸入股票代號 | Please enter a stock symbol'}
-        elif request_count >= current_limit and redis_available:
+        elif request_count >= current_limit:
             result = {'error': f'已達到 {current_tier} 方案的請求限制 ({current_limit}) | Request limit reached for {current_tier} tier ({current_limit})'}
         else:
             result = get_stock_data(symbol)
-            if 'error' not in result and redis_available:
-                try:
-                    r.incr(f'user:{user_id}:request_count')
-                except redis.RedisError as e:
-                    print(f"Failed to increment request count: {e}")
+            if 'error' not in result:
+                user_data[f'user:{user_id}:request_count'] = request_count + 1
 
     return render_template(
         "index.html",
         symbol_input=symbol_input,
         result=result,
-        current_tier_name=current_tier_name,
+        current_tier_name=current_tier,
         request_count=request_count,
         current_limit=current_limit,
         QUOTE_FIELDS=QUOTE_FIELDS,
@@ -355,8 +327,8 @@ def create_checkout_session():
                 'quantity': 1,
             }],
             mode='subscription',
-            success_url='http://localhost:8080/success?session_id={CHECKOUT_SESSION_ID}',
-            cancel_url='http://localhost:8080/',
+            success_url='https://your-app.railway.app/success?session_id={CHECKOUT_SESSION_ID}',
+            cancel_url='https://your-app.railway.app/',
             metadata={'tier': tier, 'user_id': request.remote_addr}
         )
         return jsonify({'url': checkout_session.url})
@@ -370,12 +342,8 @@ def success():
         session = stripe.checkout.Session.retrieve(session_id)
         user_id = session.metadata.user_id
         tier = session.metadata.tier
-        if redis_available:
-            try:
-                r.set(f'user:{user_id}:tier', tier)
-                r.set(f'user:{user_id}:request_count', 0)
-            except redis.RedisError as e:
-                print(f"Failed to update Redis in success route: {e}")
+        user_data[f'user:{user_id}:tier'] = tier
+        user_data[f'user:{user_id}:request_count'] = 0
     except Exception as e:
         print(f"Error in success route: {e}")
     return redirect('/')
@@ -390,12 +358,8 @@ def stripe_webhook():
             session = event['data']['object']
             user_id = session['metadata']['user_id']
             tier = session['metadata']['tier']
-            if redis_available:
-                try:
-                    r.set(f'user:{user_id}:tier', tier)
-                    r.set(f'user:{user_id}:request_count', 0)
-                except redis.RedisError as e:
-                    print(f"Failed to update Redis in webhook: {e}")
+            user_data[f'user:{user_id}:tier'] = tier
+            user_data[f'user:{user_id}:request_count'] = 0
     except Exception as e:
         print(f"Webhook error: {e}")
         return jsonify({'error': str(e)}), 400
@@ -406,13 +370,8 @@ def reset():
     password = request.form.get('password')
     if password == os.getenv('RESET_PASSWORD'):
         user_id = request.remote_addr
-        if redis_available:
-            try:
-                r.set(f'user:{user_id}:request_count', 0)
-            except redis.RedisError as e:
-                print(f"Failed to reset request count: {e}")
+        user_data[f'user:{user_id}:request_count'] = 0
     return redirect('/')
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=8080, debug=True)
-
+    app.run(host="0.0.0.0", port=int(os.getenv('PORT', 8080)))
