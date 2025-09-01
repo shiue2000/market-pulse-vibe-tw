@@ -4,11 +4,14 @@ import datetime
 import time
 import urllib.parse
 from collections import namedtuple
+import json
 import requests
 from flask import Flask, request, render_template, jsonify, redirect, session, flash
 import stripe
 import numpy as np
 import logging
+import plotly.express as px
+import pandas as pd
 from openai import OpenAI
 
 # Ensure NumPy version is <2.0 for compatibility
@@ -80,6 +83,23 @@ PRICING_TIERS = [
 
 # Finnhub setup
 FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
+if not FINNHUB_API_KEY:
+    logger.warning("Finnhub API key not set, stock name lookup may fail")
+
+# Static fallback for common stocks
+STATIC_STOCK_NAMES = {
+    '2330': '台積電 | Taiwan Semiconductor Manufacturing',
+    '2317': '鴻海精密 | Hon Hai Precision',
+    '2454': '聯發科 | MediaTek'
+}
+
+# Industry mapping (basic, can be expanded)
+industry_mapping = {
+    'Semiconductors': '半導體',
+    'Electronics': '電子',
+    'Technology': '科技',
+    'Unknown': '未知'
+}
 
 # TWStock code integrated
 try:
@@ -90,7 +110,8 @@ except ImportError:
 try:
     from twstock import codes
 except ImportError:
-    codes = {}  # Fallback if twstock.codes is not available
+    codes = {}
+    logger.warning("twstock.codes not available, relying on Finnhub or static fallback")
 
 TWSE_BASE_URL = "http://www.twse.com.tw/"
 TPEX_BASE_URL = "http://www.tpex.org.tw/"
@@ -201,7 +222,7 @@ class Stock:
         self.fetcher = TWSEFetcher() if market == "上市" else TPEXFetcher()
         self.raw_data = []
         self.data = []
-        self.fetch_90()  # Fetch 90 days to ensure enough data for 50-day MA
+        self.fetch_90()
     def _month_year_iter(self, start_month, start_year, end_month, end_year):
         ym_start = 12 * start_year + start_month - 1
         ym_end = 12 * end_year + end_month
@@ -222,9 +243,9 @@ class Stock:
         return self.data
     def fetch_90(self):
         today = datetime.datetime.today()
-        before = today - datetime.timedelta(days=120)  # Fetch 120 days to ensure 50+ days
+        before = today - datetime.timedelta(days=120)
         self.fetch_from(before.year, before.month)
-        self.data = self.data[-90:]  # Limit to last 90 days
+        self.data = self.data[-90:]
         return self.data
     @property
     def date(self):
@@ -258,31 +279,127 @@ class Stock:
         return [d.transaction for d in self.data]
 
 def get_stock_name(symbol):
-    # Try twstock.codes first
+    logger.info(f"Attempting to fetch stock name for symbol: {symbol}")
+    if symbol in STATIC_STOCK_NAMES:
+        logger.info(f"Using static stock name for {symbol}: {STATIC_STOCK_NAMES[symbol]}")
+        return STATIC_STOCK_NAMES[symbol]
     if codes and symbol in codes:
+        logger.info(f"Found stock name in twstock for {symbol}: {codes[symbol].name}")
         return codes[symbol].name
-    # Fallback to Finnhub
     profile = get_finnhub_json("stock/profile2", {"symbol": f"{symbol}.TW"})
-    return profile.get("name", "Unknown")
+    stock_name = profile.get("name", "Unknown")
+    logger.info(f"Finnhub response for {symbol}: {profile}, stock name: {stock_name}")
+    return stock_name
 
 def get_finnhub_json(endpoint, params):
+    if not FINNHUB_API_KEY:
+        logger.error("Finnhub API key not set, returning empty response")
+        return {}
     url = f"https://finnhub.io/api/v1/{endpoint}"
     params["token"] = FINNHUB_API_KEY
-    for _ in range(3):
+    for attempt in range(3):
         try:
             r = requests.get(url, params=params, timeout=10)
             r.raise_for_status()
-            return r.json()
+            response = r.json()
+            logger.info(f"Finnhub API success for {endpoint}, params: {params}, response: {response}")
+            return response
         except Exception as e:
-            logger.warning(f"[Finnhub Error] {endpoint}: {e}")
+            logger.warning(f"Finnhub API failed for {endpoint}, attempt {attempt + 1}: {e}")
             time.sleep(2)
+    logger.error(f"Finnhub API failed after 3 attempts for {endpoint}")
     return {}
+
+def get_quote(symbol):
+    stock = Stock(symbol, market="上市")
+    market = "上市"
+    if not stock.data:
+        stock = Stock(symbol, market="上櫃")
+        market = "上櫃"
+        if not stock.data:
+            logger.error(f"No data available for {symbol} on TWSE or TPEX")
+            return {'error': f'無法獲取股票 {symbol} 的數據 | No data available for {symbol}'}
+    latest_data = stock.data[-1]
+    prev_data = stock.data[-2] if len(stock.data) >= 2 else None
+    current_price = latest_data.close
+    prev_close = prev_data.close if prev_data else None
+    daily_change = ((current_price - prev_close) / prev_close * 100) if current_price and prev_close else None
+    return {
+        'current_price': round(current_price, 2) if current_price else 'N/A',
+        'daily_change': round(daily_change, 2) if daily_change else 'N/A',
+        'volume': int(latest_data.capacity) if latest_data.capacity else 'N/A',
+        'open_price': round(latest_data.open, 2) if latest_data.open else 'N/A',
+        'high_price': round(latest_data.high, 2) if latest_data.high else 'N/A',
+        'low_price': round(latest_data.low, 2) if latest_data.low else 'N/A',
+        'prev_close': round(prev_close, 2) if prev_close else 'N/A'
+    }
+
+def get_metrics(symbol):
+    metrics = {
+        'pe': 'N/A',
+        'pb': 'N/A',
+        'revenue_growth': 'N/A',
+        'eps_growth': 'N/A'
+    }
+    finnhub_metrics = get_finnhub_json("stock/metric", {"symbol": f"{symbol}.TW"})
+    if finnhub_metrics.get('metric'):
+        metrics['pe'] = round(finnhub_metrics['metric'].get('peTTM', 'N/A'), 2) if finnhub_metrics['metric'].get('peTTM') else 'N/A'
+        metrics['pb'] = round(finnhub_metrics['metric'].get('pb', 'N/A'), 2) if finnhub_metrics['metric'].get('pb') else 'N/A'
+    return metrics
+
+def filter_metrics(metrics):
+    return {k: v for k, v in metrics.items() if v != 'N/A'}
+
+def get_company_profile(symbol):
+    profile = get_finnhub_json("stock/profile2", {"symbol": f"{symbol}.TW"})
+    return profile
+
+def get_historical_data(symbol):
+    stock = Stock(symbol, market="上市")
+    market = "上市"
+    if not stock.data:
+        stock = Stock(symbol, market="上櫃")
+        market = "上櫃"
+        if not stock.data:
+            logger.error(f"No historical data for {symbol}")
+            return pd.DataFrame(), {'ma50': 'N/A', 'support': 'N/A', 'resistance': 'N/A', 'volume': 'N/A'}
+    df = pd.DataFrame({
+        'date': stock.date,
+        'close': stock.close,
+        'volume': stock.capacity
+    })
+    prices = [p for p in stock.close if p is not None]
+    if len(prices) >= 50:
+        ma50 = np.mean(prices[-50:])
+        support = min(prices[-50:])
+        resistance = max(prices[-50:])
+    elif prices:
+        ma50 = np.mean(prices)
+        support = min(prices)
+        resistance = max(prices)
+    else:
+        ma50 = support = resistance = 'N/A'
+    technical = {
+        'ma50': round(ma50, 2) if isinstance(ma50, (int, float)) else 'N/A',
+        'support': round(support, 2) if isinstance(support, (int, float)) else 'N/A',
+        'resistance': round(resistance, 2) if isinstance(support, (int, float)) else 'N/A',
+        'volume': int(stock.capacity[-1]) if stock.capacity else 'N/A'
+    }
+    return df, technical
+
+def get_plot_html(df, symbol):
+    if df.empty:
+        return ""
+    fig = px.line(df, x='date', y='close', title=f"{symbol} Stock Price")
+    fig.update_layout(xaxis_title="Date", yaxis_title="Price (TWD)")
+    return fig.to_html(full_html=False)
 
 def get_recent_news(symbol):
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     past = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
     news = get_finnhub_json("company-news", {"symbol": f"{symbol}.TW", "from": past, "to": today})
     if not isinstance(news, list):
+        logger.warning(f"No news data for {symbol}, received: {news}")
         return []
     news = sorted(news, key=lambda x: x.get("datetime", 0), reverse=True)[:10]
     for n in news:
@@ -294,149 +411,74 @@ def get_recent_news(symbol):
 
 def get_stock_data(symbol):
     if not symbol.isdigit() or len(symbol) != 4:
+        logger.error(f"Invalid stock symbol: {symbol}")
         return {'error': '股票代號必須為4位數字 | Stock ID must be a 4-digit number'}
     
     try:
-        # Try TWSE (上市) first
-        stock = Stock(symbol, market="上市")
-        market = "上市"
-        if not stock.data:
-            # Fallback to TPEX (上櫃)
-            stock = Stock(symbol, market="上櫃")
-            market = "上櫃"
-            if not stock.data:
-                return {'error': f'無法獲取股票 {symbol} 的數據 | No data available for {symbol}'}
-
         stock_name = get_stock_name(symbol)
-        latest_data = stock.data[-1]
-        prev_data = stock.data[-2] if len(stock.data) >= 2 else None
-        current_price = latest_data.close
-        prev_close = prev_data.close if prev_data else None
-        daily_change = ((current_price - prev_close) / prev_close * 100) if current_price and prev_close else None
-
-        quote = {
-            'current_price': round(current_price, 2) if current_price else 'N/A',
-            'daily_change': round(daily_change, 2) if daily_change else 'N/A',
-            'volume': int(latest_data.capacity) if latest_data.capacity else 'N/A',
-            'open_price': round(latest_data.open, 2) if latest_data.open else 'N/A',
-            'high_price': round(latest_data.high, 2) if latest_data.high else 'N/A',
-            'low_price': round(latest_data.low, 2) if latest_data.low else 'N/A',
-            'prev_close': round(prev_close, 2) if prev_close else 'N/A'
-        }
-
-        # Calculate technical indicators
-        prices = [d.close for d in stock.data if d.close is not None]
-        if len(prices) >= 50:
-            ma50 = np.mean(prices[-50:])
-            support = min(prices[-50:])
-            resistance = max(prices[-50:])
-        elif prices:
-            ma50 = np.mean(prices)
-            support = min(prices)
-            resistance = max(prices)
-        else:
-            ma50 = support = resistance = 'N/A'
-        
-        technical = {
-            'ma50': round(ma50, 2) if isinstance(ma50, (int, float)) else 'N/A',
-            'support': round(support, 2) if isinstance(support, (int, float)) else 'N/A',
-            'resistance': round(resistance, 2) if isinstance(support, (int, float)) else 'N/A'
-        }
-
-        # Placeholder for financial metrics (not available via twstock)
-        metrics = {
-            'pe': 'N/A',
-            'pb': 'N/A',
-            'revenue_growth': 'N/A',
-            'eps_growth': 'N/A'
-        }
-
-        def analyze_stock(stock_name, symbol, quote, technical, metrics):
-            try:
-                prompt = f"""
-                你是一位專業的台灣股市交易分析師。請根據以下股票數據為股票 {stock_name} ({symbol}) 提供投資建議：
-
-                - 開盤價: {quote['open_price'] if quote['open_price'] != 'N/A' else '未知'}
-                - 當日最高價: {quote['high_price'] if quote['high_price'] != 'N/A' else '未知'}
-                - 當日最低價: {quote['low_price'] if quote['low_price'] != 'N/A' else '未知'}
-                - 收盤價: {quote['current_price'] if quote['current_price'] != 'N/A' else '未知'}
-                - 當日變化: {quote['daily_change'] if quote['daily_change'] != 'N/A' else '未知'}%
-                - 成交股數: {quote['volume'] if quote['volume'] != 'N/A' else '未知'}
-                - 50日移動平均線: {technical['ma50'] if technical['ma50'] != 'N/A' else '未知'}
-                - 支撐位: {technical['support'] if technical['support'] != 'N/A' else '未知'}
-                - 阻力位: {technical['resistance'] if technical['resistance'] != 'N/A' else '未知'}
-
-                請提供：
-                1. 投資建議 (買入/賣出/持有 | Buy/Sell/Hold)
-                2. 理由 (Rationale)
-                3. 風險評估 (Risk Assessment)
-                4. 總結 (Summary)
-                回答需簡潔，並以中文和英文提供，格式如下：
-                - 投資建議: [建議] | [Recommendation]
-                - 理由: [理由] | [Rationale]
-                - 風險評估: [風險] | [Risk]
-                - 總結: [總結] | [Summary]
-                """
-                response = openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "你是一位專業的台灣股市交易分析師，提供精確且簡潔的投資建議。"},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=500,
-                    temperature=0.7
-                )
-                generated_text = response.choices[0].message.content.strip()
-                
-                recommendation = 'hold'
-                rationale = '無法解析明確建議。 | Unable to parse clear recommendation.'
-                risk = '中等風險，需密切關注市場動態。 | Moderate risk, monitor market dynamics closely.'
-                summary = '根據數據，投資決策應謹慎，持續關注市場變化。 | Based on data, investment decisions should be cautious with ongoing market monitoring.'
-                
-                for line in generated_text.split('\n'):
-                    line = line.strip()
-                    if line.startswith('投資建議:') or line.startswith('Recommendation:'):
-                        rec_text = line.split(':', 1)[-1].strip().lower()
-                        if '買入' in rec_text or 'buy' in rec_text:
-                            recommendation = 'buy'
-                        elif '賣出' in rec_text or 'sell' in rec_text:
-                            recommendation = 'sell'
-                        else:
-                            recommendation = 'hold'
-                    elif line.startswith('理由:') or line.startswith('Rationale:'):
-                        rationale = line.split(':', 1)[-1].strip()
-                    elif line.startswith('風險評估:') or line.startswith('Risk:'):
-                        risk = line.split(':', 1)[-1].strip()
-                    elif line.startswith('總結:') or line.startswith('Summary:'):
-                        summary = line.split(':', 1)[-1].strip()
-                
-                return {
-                    'recommendation': recommendation,
-                    'rationale': rationale,
-                    'risk': risk,
-                    'summary': summary
-                }
-            except Exception as e:
-                logger.error(f"OpenAI analysis failed: {e}")
-                return {
-                    'recommendation': 'hold',
-                    'rationale': '分析失敗，採用後備邏輯。 | Analysis failed, using fallback logic.',
-                    'risk': '中等風險，需密切關注市場動態。 | Moderate risk, monitor market dynamics closely.',
-                    'summary': '由於分析失敗，建議謹慎並持續關注市場。 | Due to analysis failure, exercise caution and monitor market trends.'
-                }
-
-        gpt_analysis = analyze_stock(stock_name, symbol, quote, technical, metrics)
+        quote = get_quote(symbol)
+        if 'error' in quote:
+            return quote
+        metrics = filter_metrics(get_metrics(symbol))
         news = get_recent_news(symbol)
+        profile = get_company_profile(symbol)
+        industry_en = profile.get("finnhubIndustry", "Unknown")
+        industry_zh = industry_mapping.get(industry_en, "未知")
+        df, technical = get_historical_data(symbol)
+        plot_html = get_plot_html(df, symbol)
+        
+        technical_str = ", ".join(f"{k.upper()}: {v}" for k, v in technical.items())
+        prompt = f"""
+        請根據以下資訊產出中英文雙語股票分析: 
+        股票代號: {symbol}, 
+        目前價格: {quote.get('current_price', 'N/A')}, 
+        產業分類: {industry_zh} ({industry_en}), 
+        財務指標: {metrics}, 
+        技術指標: {technical_str}.
+        請提供：
+        1. 投資建議 (買入/賣出/持有 | Buy/Sell/Hold)
+        2. 理由 (Rationale)
+        3. 風險評估 (Risk Assessment)
+        4. 總結 (Summary)
+        回答需以JSON格式回應，包含中英文內容完全對等：
+        {'recommendation': 'buy' or 'sell' or 'hold', 
+         'rationale': '中文 rationale\\nEnglish rationale', 
+         'risk': '中文 risk\\nEnglish risk', 
+         'summary': '中文 summary\\nEnglish summary'}
+        """
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "你是一位中英雙語金融分析助理，中英文內容完全對等。請以JSON格式回應，確保結構一致且無錯誤。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=999,
+            temperature=0.6,
+            response_format={"type": "json_object"}
+        )
+        try:
+            gpt_analysis = json.loads(response.choices[0].message.content)
+        except Exception as e:
+            logger.error(f"Failed to parse OpenAI response: {e}")
+            gpt_analysis = {
+                'recommendation': 'hold',
+                'rationale': '分析失敗，採用後備邏輯。\nAnalysis failed, using fallback logic.',
+                'risk': '中等風險，需密切關注市場動態。\nModerate risk, monitor market dynamics closely.',
+                'summary': '由於分析失敗，建議謹慎並持續關注市場。\nDue to analysis failure, exercise caution and monitor market trends.'
+            }
+        
         return {
             'symbol': symbol,
             'stock_name': stock_name,
             'quote': quote,
-            'technical': technical,
+            'industry_en': industry_en,
+            'industry_zh': industry_zh,
             'metrics': metrics,
+            'news': news,
             'gpt_analysis': gpt_analysis,
-            'industry_en': 'Unknown',  # Not available via twstock
-            'market': market,
-            'news': news
+            'plot_html': plot_html,
+            'technical': {k: v if v != 'N/A' else 'N/A' for k, v in technical.items()},
+            'market': '上市' if not df.empty else '上櫃'
         }
     except Exception as e:
         logger.error(f"Error fetching stock data for {symbol}: {e}")
