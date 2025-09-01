@@ -14,6 +14,35 @@ import plotly.express as px
 import pandas as pd
 from openai import OpenAI, AuthenticationError, RateLimitError, APIError
 
+# ---------- Safe casting helpers ----------
+def safe_int(val, default=0):
+    """
+    Convert val to int safely. Returns default on failure.
+    Accepts numeric, numeric-strings, None.
+    """
+    try:
+        # handle boolean explicitly
+        if isinstance(val, bool):
+            return int(val)
+        if val is None:
+            return default
+        return int(val)
+    except (ValueError, TypeError):
+        try:
+            # try float->int fallback
+            return int(float(val))
+        except Exception:
+            return default
+
+def safe_float(val, default=0.0):
+    """Convert val to float safely. Returns default on failure."""
+    try:
+        if val is None:
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
 # ---------- Basic checks & app setup ----------
 # Ensure NumPy compatibility (clear error if >=2.0)
 if not np.__version__.startswith("1."):
@@ -32,7 +61,7 @@ STRIPE_TEST_SECRET_KEY = os.getenv("STRIPE_TEST_SECRET_KEY")
 STRIPE_TEST_PUBLISHABLE_KEY = os.getenv("STRIPE_TEST_PUBLISHABLE_KEY")
 STRIPE_LIVE_SECRET_KEY = os.getenv("STRIPE_LIVE_SECRET_KEY")
 STRIPE_LIVE_PUBLISHABLE_KEY = os.getenv("STRIPE_LIVE_PUBLISHABLE_KEY")
-STRIPE_MODE = os.getenv("STRIPE_MODE", "test").lower()
+STRIPE_MODE = (os.getenv("STRIPE_MODE", "test") or "test").lower()
 STRIPE_PRICE_IDS = {
     "Free": os.getenv("STRIPE_PRICE_TIER0"),
     "Basic": os.getenv("STRIPE_PRICE_TIER1"),
@@ -417,7 +446,7 @@ def get_quote(symbol: str) -> dict:
         prev = stock.data[-2] if len(stock.data) >= 2 else None
         current_price = latest.close
         prev_close = prev.close if prev else None
-        daily_change = ((current_price - prev_close) / prev_close * 100) if current_price and prev_close else None
+        daily_change = ((current_price - prev_close) / prev_close * 100) if (isinstance(current_price, (int, float)) and isinstance(prev_close, (int, float))) else None
         return {
             "current_price": round(current_price, 2) if isinstance(current_price, (int, float)) else "N/A",
             "daily_change": f"{round(daily_change, 2)}%" if isinstance(daily_change, (int, float)) else "N/A",
@@ -436,7 +465,7 @@ def get_metrics(symbol: str) -> dict:
     try:
         metrics = {"pe": "N/A", "pb": "N/A", "revenue_growth": "N/A", "eps_growth": "N/A"}
         res = get_finnhub_json("stock/metric", {"symbol": f"{symbol}.TW"})
-        metric = res.get("metric", {})
+        metric = res.get("metric", {}) if isinstance(res, dict) else {}
         if metric:
             metrics["pe"] = round(metric.get("peTTM", 0), 2) if metric.get("peTTM") else "N/A"
             metrics["pb"] = round(metric.get("pb", 0), 2) if metric.get("pb") else "N/A"
@@ -446,11 +475,11 @@ def get_metrics(symbol: str) -> dict:
         return {"pe": "N/A", "pb": "N/A", "revenue_growth": "N/A", "eps_growth": "N/A"}
 
 def filter_metrics(metrics: dict) -> dict:
-    return {k: v for k, v in metrics.items() if v != "N/A"}
+    return {k: v for k, v in (metrics or {}).items() if v != "N/A"}
 
 def get_company_profile(symbol: str) -> dict:
     try:
-        return get_finnhub_json("stock/profile2", {"symbol": f"{symbol}.TW"})
+        return get_finnhub_json("stock/profile2", {"symbol": f"{symbol}.TW"}) or {}
     except Exception as e:
         logger.error(f"get_company_profile error for {symbol}: {e}")
         return {}
@@ -470,7 +499,7 @@ def get_historical_data(symbol: str):
             "close": stock.close,
             "volume": stock.capacity,
         })
-        prices = [p for p in stock.close if p is not None]
+        prices = [p for p in stock.close if isinstance(p, (int, float))]
         if not prices:
             ma50 = support = resistance = "N/A"
         elif len(prices) >= 50:
@@ -519,7 +548,7 @@ def get_recent_news(symbol: str):
             logger.warning(f"Company news not a list for {symbol}: {news}")
             return []
         # sort by datetime if present (unix timestamp expected)
-        news_sorted = sorted(news, key=lambda x: x.get("datetime", 0), reverse=True)[:10]
+        news_sorted = sorted(news, key=lambda x: x.get("datetime", 0) or 0, reverse=True)[:10]
         for n in news_sorted:
             try:
                 n["datetime"] = datetime.datetime.utcfromtimestamp(n.get("datetime", 0)).strftime("%Y-%m-%d %H:%M")
@@ -538,24 +567,20 @@ def call_openai_for_analysis(prompt: str) -> dict:
     """
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # adjust model name if needed
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "你是一位中英雙語金融分析助理，中英文內容完全對等。請以JSON格式回應，確保結構一致且無錯誤。"},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=900,
             temperature=0.6,
-            # Note: depending on SDK version, response_format may differ. If you have an older/newer SDK,
-            # adapt accordingly. Here we expect the assistant message to contain the JSON string.
         )
         # Extract content safely
         content = ""
         try:
             content = response.choices[0].message.content
         except Exception:
-            # Some SDKs return different shapes
             content = getattr(response.choices[0], "text", "")
-        # Attempt to parse JSON
         try:
             parsed = json.loads(content)
             return parsed
@@ -587,7 +612,7 @@ def call_openai_for_analysis(prompt: str) -> dict:
 # ---------- Main aggregator ----------
 def get_stock_data(symbol: str) -> dict:
     # Input validation
-    if not symbol.isdigit() or len(symbol) != 4:
+    if not isinstance(symbol, str) or not symbol.isdigit() or len(symbol) != 4:
         return {"error": "股票代號必須為4位數字 | Stock ID must be a 4-digit number"}
 
     logger.info(f"Processing stock data for {symbol}")
@@ -632,9 +657,7 @@ def get_stock_data(symbol: str) -> dict:
     "summary": "中文 summary\\nEnglish summary"
 }}
 """
-
         gpt_analysis = call_openai_for_analysis(prompt)
-        # Make sure technical values are stringified
         technical_clean = {k: str(v) if v != "N/A" else "N/A" for k, v in technical.items()}
 
         return {
@@ -655,23 +678,21 @@ def get_stock_data(symbol: str) -> dict:
         return {"error": f"無法獲取股票 {symbol} 的數據: {str(e)} | Failed to fetch data for {symbol}: {str(e)}"}
 
 # ---------- Flask routes ----------
-@app.errorhandler(Exception)
-def handle_error(error):
-    logger.exception("Unhandled exception occurred")
-    return jsonify({"error": f"伺服器內部錯誤: {str(error)} | Internal server error: {str(error)}"}), 500
-
 @app.route("/", methods=["GET", "POST"])
 def index():
     symbol_input = ""
     result = {}
     user_id = request.remote_addr or "unknown"
-    current_tier_index = session.get("paid_tier", 0)
+
+    # Use safe_int for session values (may be strings)
+    current_tier_index = safe_int(session.get("paid_tier", 0), 0)
     current_tier_index = min(max(current_tier_index, 0), len(PRICING_TIERS) - 1)
     current_tier = PRICING_TIERS[current_tier_index]
     current_tier_name = current_tier["name"]
+
     # Get request_count from session first, fallback to in-memory user_data
-    request_count = session.get("request_count", user_data.get(f"user:{user_id}:request_count", 0))
-    current_limit = current_tier["limit"]
+    request_count = safe_int(session.get("request_count", user_data.get(f"user:{user_id}:request_count", 0)), 0)
+    current_limit = safe_int(current_tier.get("limit", 0), 0)
 
     if request.method == "POST":
         symbol = (request.form.get("symbol") or "").strip()
@@ -683,7 +704,7 @@ def index():
         else:
             result = get_stock_data(symbol)
             if "error" not in result:
-                # increment both session and in-memory user_data
+                # increment both session and in-memory user_data safely
                 request_count = request_count + 1
                 session["request_count"] = request_count
                 user_data[f"user:{user_id}:request_count"] = request_count
@@ -704,8 +725,14 @@ def index():
 
 @app.route("/create-checkout-session", methods=["POST"])
 def create_checkout_session():
+    # tier can be passed as tier name or index — try name first
     tier_name = request.form.get("tier")
     tier = next((t for t in PRICING_TIERS if t["name"] == tier_name), None)
+    # fallback: treat as index
+    if not tier:
+        tier_index = safe_int(tier_name, None)
+        if tier_index is not None and 0 <= tier_index < len(PRICING_TIERS):
+            tier = PRICING_TIERS[tier_index]
     if not tier:
         logger.error("Invalid tier requested: %s", tier_name)
         return jsonify({"error": "無效的方案 | Invalid tier"}), 400
@@ -719,20 +746,20 @@ def create_checkout_session():
         flash("✅ 已切換到免費方案 | Switched to Free tier.", "success")
         return jsonify({"url": url_for("index", _external=True)})
 
-    price_id = STRIPE_PRICE_IDS.get(tier_name)
+    price_id = STRIPE_PRICE_IDS.get(tier["name"])
     if not price_id:
-        logger.error("No Price ID configured for %s", tier_name)
-        flash(f"⚠️ {tier_name} 方案目前不可用 | Subscription for {tier_name} is currently unavailable.", "warning")
-        return jsonify({"error": f"{tier_name} 方案目前不可用 | Subscription for {tier_name} is currently unavailable"}), 400
+        logger.error("No Price ID configured for %s", tier["name"])
+        flash(f"⚠️ {tier['name']} 方案目前不可用 | Subscription for {tier['name']} is currently unavailable.", "warning")
+        return jsonify({"error": f"{tier['name']} 方案目前不可用 | Subscription for {tier['name']} is currently unavailable"}), 400
 
     try:
         checkout_session = stripe.checkout.Session.create(
             payment_method_types=["card"],
             line_items=[{"price": price_id, "quantity": 1}],
             mode="subscription",
-            success_url=url_for("payment_success", tier_name=tier_name, _external=True),
+            success_url=url_for("payment_success", tier_name=tier["name"], _external=True),
             cancel_url=url_for("index", _external=True),
-            metadata={"tier": tier_name, "user_id": request.remote_addr},
+            metadata={"tier": tier["name"], "user_id": request.remote_addr},
         )
         return jsonify({"url": checkout_session.url})
     except Exception as e:
@@ -744,7 +771,7 @@ def payment_success(tier_name):
     tier_index = next((i for i, t in enumerate(PRICING_TIERS) if t["name"] == tier_name), None)
     if tier_index is not None and tier_name != "Free":
         session["subscribed"] = True
-        session["paid_tier"] = tier_index
+        session["paid_tier"] = int(tier_index)
         session["request_count"] = 0
         user_data[f"user:{request.remote_addr}:tier"] = tier_name
         user_data[f"user:{request.remote_addr}:request_count"] = 0
@@ -764,8 +791,9 @@ def stripe_webhook():
             event = json.loads(payload)
         if event.get("type") == "checkout.session.completed":
             stripe_session = event["data"]["object"]
-            user_id = stripe_session.get("metadata", {}).get("user_id")
-            tier = stripe_session.get("metadata", {}).get("tier")
+            metadata = stripe_session.get("metadata", {}) if isinstance(stripe_session, dict) else {}
+            user_id = metadata.get("user_id")
+            tier = metadata.get("tier")
             tier_index = next((i for i, t in enumerate(PRICING_TIERS) if t["name"] == tier), None)
             if tier_index is not None and user_id:
                 user_data[f"user:{user_id}:tier"] = tier
@@ -795,4 +823,4 @@ def reset():
 
 # ---------- Run ----------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    app.run(host="0.0.0.0", port=safe_int(os.getenv("PORT", 8080), 8080))
