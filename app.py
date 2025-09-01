@@ -7,9 +7,9 @@ import stripe
 from dotenv import load_dotenv
 import logging
 import time
-import yfinance as yf
+import twstock
 import pandas as pd
-import json,os
+import json, os
 
 # ------------------ Load environment ------------------
 load_dotenv()
@@ -21,7 +21,6 @@ STRIPE_TEST_PUBLISHABLE_KEY = os.getenv("STRIPE_TEST_PUBLISHABLE_KEY")
 STRIPE_LIVE_SECRET_KEY = os.getenv("STRIPE_LIVE_SECRET_KEY")
 STRIPE_LIVE_PUBLISHABLE_KEY = os.getenv("STRIPE_LIVE_PUBLISHABLE_KEY")
 STRIPE_MODE = os.getenv("STRIPE_MODE", "test").lower()
-
 # Stripe Price IDs
 STRIPE_PRICE_IDS = {
     "Free": os.getenv("STRIPE_PRICE_TIER0"),
@@ -30,10 +29,8 @@ STRIPE_PRICE_IDS = {
     "Tier 3": os.getenv("STRIPE_PRICE_TIER3"),
     "Tier 4": os.getenv("STRIPE_PRICE_TIER4"),
 }
-
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY not set in .env")
-
 # Set Stripe keys
 if STRIPE_MODE == "live":
     STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
@@ -41,10 +38,8 @@ if STRIPE_MODE == "live":
 else:
     STRIPE_SECRET_KEY = STRIPE_TEST_SECRET_KEY
     STRIPE_PUBLISHABLE_KEY = STRIPE_TEST_PUBLISHABLE_KEY
-
 if not STRIPE_SECRET_KEY or not STRIPE_PUBLISHABLE_KEY:
     raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in .env")
-
 stripe.api_key = STRIPE_SECRET_KEY
 
 # ------------------ Logger setup ------------------
@@ -57,34 +52,32 @@ app.secret_key = SECRET_KEY
 openai.api_key = OPENAI_API_KEY
 
 # ------------------ Stock app config ------------------
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 industry_mapping = {
-    "Technology": "科技業",
-    "Financial Services": "金融服務業",
-    "Healthcare": "醫療保健業",
-    "Consumer Cyclical": "非必需消費品業",
-    "Communication Services": "通訊服務業",
-    "Energy": "能源業",
-    "Industrials": "工業類股",
-    "Utilities": "公用事業",
-    "Real Estate": "房地產業",
-    "Materials": "原物料業",
-    "Consumer Defensive": "必需消費品業",
-    "Unknown": "未知"
+    "半導體": "Semiconductors",
+    "電子零組件": "Electronic Components",
+    "電腦及週邊": "Computers and Peripherals",
+    "金融保險": "Financial Services",
+    "通信網路": "Communication Networks",
+    "光電": "Optoelectronics",
+    "汽車": "Automotive",
+    "水泥": "Cement",
+    "食品": "Food",
+    "塑膠": "Plastics",
+    "其他": "Others"
 }
 IMPORTANT_METRICS = [
-    "peTTM", "pb", "roeTTM", "roaTTM", "grossMarginTTM",
-    "revenueGrowthTTMYoy", "epsGrowthTTMYoy", "debtToEquityAnnual"
+    "pe", "pb", "roe", "roa", "gross_margin",
+    "revenue_growth", "eps_growth", "debt_to_equity"
 ]
 METRIC_NAMES_ZH_EN = {
-    "pe_ratio": "本益比 (PE TTM)",
-    "pb_ratio": "股價淨值比 (PB)",
-    "roe_ttm": "股東權益報酬率 (ROE TTM)",
-    "roa_ttm": "資產報酬率 (ROA TTM)",
-    "gross_margin_ttm": "毛利率 (Gross Margin TTM)",
+    "pe": "本益比 (PE)",
+    "pb": "股價淨值比 (PB)",
+    "roe": "股東權益報酬率 (ROE)",
+    "roa": "資產報酬率 (ROA)",
+    "gross_margin": "毛利率 (Gross Margin)",
     "revenue_growth": "營收成長率 (YoY)",
     "eps_growth": "每股盈餘成長率 (EPS Growth YoY)",
-    "debt_to_equity": "負債權益比 (Debt to Equity Annual)"
+    "debt_to_equity": "負債權益比 (Debt to Equity)"
 }
 QUOTE_FIELDS = {
     "current_price": ("即時股價", "Current Price"),
@@ -109,78 +102,81 @@ PRICING_TIERS = [
 def validate_price_id(price_id, tier_name):
     return bool(price_id)
 
-def get_finnhub_json(endpoint, params):
-    url = f"https://finnhub.io/api/v1/{endpoint}"
-    params["token"] = FINNHUB_API_KEY
-    for _ in range(3):
-        try:
-            r = requests.get(url, params=params, timeout=5)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            logger.warning(f"[Finnhub Error] {endpoint}: {e}")
-            time.sleep(2)
-    return {}
-
 def get_quote(symbol):
-    data = get_finnhub_json("quote", {"symbol": symbol})
-    quote = {}
-    if data:
+    try:
+        stock = twstock.Stock(symbol)
+        quote_data = stock.fetch_from((datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y-%m'), datetime.datetime.now().strftime('%Y-%m'))
+        if not quote_data:
+            return {}
+        latest = quote_data[-1]
         quote = {
-            'current_price': round(data.get('c', 'N/A'), 4),
-            'open': round(data.get('o', 'N/A'), 4),
-            'high': round(data.get('h', 'N/A'), 4),
-            'low': round(data.get('l', 'N/A'), 4),
-            'previous_close': round(data.get('pc', 'N/A'), 4),
-            'daily_change': round(data.get('dp', 'N/A'), 4),
-            'volume': 'N/A'  # Will be updated later if available
+            'current_price': round(latest.close, 2),
+            'open': round(latest.open, 2),
+            'high': round(latest.high, 2),
+            'low': round(latest.low, 2),
+            'previous_close': round(quote_data[-2].close if len(quote_data) > 1 else latest.close, 2),
+            'daily_change': round((latest.close - quote_data[-2].close) / quote_data[-2].close * 100, 2) if len(quote_data) > 1 else 'N/A',
+            'volume': latest.capacity
         }
-    return quote
+        return quote
+    except Exception as e:
+        logger.warning(f"[twstock Error] {symbol}: {e}")
+        return {}
 
 def get_metrics(symbol):
-    return get_finnhub_json("stock/metric", {"symbol": symbol, "metric": "all"}).get("metric", {})
+    try:
+        stock = twstock.Stock(symbol)
+        # twstock does not provide direct access to financial metrics like Finnhub
+        # Simulate basic metrics using available data or external API if needed
+        # For simplicity, return a subset of metrics (mocked or limited)
+        metrics = {
+            "pe": "N/A",  # Placeholder, requires external financial data source
+            "pb": "N/A",
+            "roe": "N/A",
+            "roa": "N/A",
+            "gross_margin": "N/A",
+            "revenue_growth": "N/A",
+            "eps_growth": "N/A",
+            "debt_to_equity": "N/A"
+        }
+        return metrics
+    except Exception as e:
+        logger.warning(f"[twstock Metrics Error] {symbol}: {e}")
+        return {}
 
 def filter_metrics(metrics):
     filtered = {}
-    metric_map = {
-        "peTTM": "pe_ratio",
-        "pb": "pb_ratio",
-        "roeTTM": "roe_ttm",
-        "roaTTM": "roa_ttm",
-        "grossMarginTTM": "gross_margin_ttm",
-        "revenueGrowthTTMYoy": "revenue_growth",
-        "epsGrowthTTMYoy": "eps_growth",
-        "debtToEquityAnnual": "debt_to_equity"
-    }
-    for original_key, new_key in metric_map.items():
-        v = metrics.get(original_key)
-        if v is not None:
+    for key in IMPORTANT_METRICS:
+        v = metrics.get(key)
+        if v != "N/A":
             try:
                 v = float(v)
-                if "growth" in new_key or "margin" in new_key or "roe" in new_key or "roa" in new_key:
-                    filtered[new_key] = f"{v:.2f}%"
+                if "growth" in key or "margin" in key or "roe" in key or "roa" in key:
+                    filtered[key] = f"{v:.2f}%"
                 else:
-                    filtered[new_key] = round(v, 4)
+                    filtered[key] = round(v, 4)
             except:
-                filtered[new_key] = str(v)
+                filtered[key] = str(v)
+        else:
+            filtered[key] = "N/A"
     return filtered
 
 def get_recent_news(symbol):
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
-    past = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
-    news = get_finnhub_json("company-news", {"symbol": symbol, "from": past, "to": today})
-    if not isinstance(news, list):
-        return []
-    news = sorted(news, key=lambda x: x.get("datetime", 0), reverse=True)[:10]
-    for n in news:
-        try:
-            n["datetime"] = datetime.datetime.utcfromtimestamp(n["datetime"]).strftime("%Y-%m-%d %H:%M")
-        except:
-            n["datetime"] = "未知時間"
-    return news
+    # twstock does not provide news; placeholder for external news API
+    return []
 
 def get_company_profile(symbol):
-    return get_finnhub_json("stock/profile2", {"symbol": symbol})
+    try:
+        stock = twstock.Stock(symbol)
+        # twstock provides limited profile data; use twstock.codes for basic info
+        profile = twstock.codes.get(symbol, {})
+        return {
+            "finnhubIndustry": profile.get("industry", "其他"),
+            "name": profile.get("name", "未知")
+        }
+    except Exception as e:
+        logger.warning(f"[twstock Profile Error] {symbol}: {e}")
+        return {"finnhubIndustry": "其他"}
 
 def calculate_rsi(series, period=14):
     delta = series.diff(1)
@@ -193,36 +189,37 @@ def calculate_rsi(series, period=14):
     return rsi.iloc[-1]
 
 def get_historical_data(symbol):
-    df = pd.DataFrame()
-    for _ in range(3):
-        try:
-            df = yf.download(symbol, period="1y", progress=False)
-            if not df.empty:
-                break
-            time.sleep(2)
-        except Exception as e:
-            logger.warning(f"[YF Historical Error] {symbol}: {e}")
-            time.sleep(2)
-    if df.empty:
+    try:
+        stock = twstock.Stock(symbol)
+        data = stock.fetch_from((datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m'), datetime.datetime.now().strftime('%Y-%m'))
+        if not data:
+            return pd.DataFrame(), {}
+        df = pd.DataFrame(data)
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        df = df[['open', 'high', 'low', 'close', 'capacity']].rename(columns={'close': 'Close', 'capacity': 'Volume'})
+        
+        # Compute technical indicators
+        ma50 = df['Close'].rolling(50).mean().iloc[-1]
+        rsi = calculate_rsi(df['Close'])
+        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+        macd = ema12.iloc[-1] - ema26.iloc[-1]
+        support = df['Low'].tail(20).min()
+        resistance = df['High'].tail(20).max()
+        volume = df['Volume'].iloc[-1]
+        technical = {
+            'ma50': round(ma50, 2),
+            'rsi': round(rsi, 2),
+            'macd': round(macd, 2),
+            'support': round(support, 2),
+            'resistance': round(resistance, 2),
+            'volume': volume
+        }
+        return df, technical
+    except Exception as e:
+        logger.warning(f"[twstock Historical Error] {symbol}: {e}")
         return pd.DataFrame(), {}
-    # Compute technical indicators
-    ma50 = df['Close'].rolling(50).mean().iloc[-1]
-    rsi = calculate_rsi(df['Close'])
-    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-    macd = ema12.iloc[-1] - ema26.iloc[-1]
-    support = df['Low'].tail(20).min()
-    resistance = df['High'].tail(20).max()
-    volume = df['Volume'].iloc[-1]
-    technical = {
-        'ma50': round(ma50, 2),
-        'rsi': round(rsi, 2),
-        'macd': round(macd, 2),
-        'support': round(support, 2),
-        'resistance': round(resistance, 2),
-        'volume': volume
-    }
-    return df, technical
 
 def get_plot_html(df, symbol):
     if df.empty or 'Close' not in df.columns:
@@ -235,7 +232,7 @@ def get_plot_html(df, symbol):
     fig.update_layout(
         title=f"{symbol} 最近7日收盤價 / 7-Day Closing Price Trend",
         xaxis_title="日期 / Date",
-        yaxis_title="收盤價 (USD)",
+        yaxis_title="收盤價 (TWD)",
         template="plotly_white",
         height=400
     )
@@ -251,7 +248,7 @@ def index():
     request_count = session.get("request_count", 0)
     current_limit = current_tier["limit"]
     current_tier_name = current_tier["name"]
-    
+   
     if request.method == "POST":
         if request_count >= current_limit:
             result["error"] = f"已達 {current_tier_name} 等級請求上限，請升級方案"
@@ -259,27 +256,26 @@ def index():
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
-        
-        symbol = request.form.get("symbol", "").strip().upper()
+       
+        symbol = request.form.get("symbol", "").strip()
         if not symbol:
             result["error"] = "請輸入股票代號 / Please enter a stock symbol"
             return render_template("index.html", result=result, symbol_input=symbol,
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
-
         try:
             session["request_count"] = request_count + 1
             quote = get_quote(symbol)
             metrics = filter_metrics(get_metrics(symbol))
             news = get_recent_news(symbol)
             profile = get_company_profile(symbol)
-            industry_en = profile.get("finnhubIndustry", "Unknown")
-            industry_zh = industry_mapping.get(industry_en, "未知")
+            industry_zh = profile.get("finnhubIndustry", "其他")
+            industry_en = industry_mapping.get(industry_zh, "Others")
             df, technical = get_historical_data(symbol)
             quote['volume'] = technical.get('volume', 'N/A')
             plot_html = get_plot_html(df, symbol)
-            
+           
             technical_str = ", ".join(f"{k.upper()}: {v}" for k, v in technical.items())
             prompt = f"請根據以下資訊產出中英文雙語股票分析: 股票代號: {symbol}, 目前價格: {quote.get('current_price','N/A')}, 產業分類: {industry_zh} ({industry_en}), 財務指標: {metrics}, 技術指標: {technical_str}. 請提供買入/賣出/持有建議."
             chat_response = openai.ChatCompletion.create(
@@ -298,7 +294,7 @@ def index():
                 gpt_analysis = chat_response['choices'][0]['message']['content'].strip()
             if isinstance(gpt_analysis, str):
                 gpt_analysis = {'summary': gpt_analysis + "\n\n---\n\n*以上分析僅供參考，投資有風險*"}
-            
+           
             result = {
                 "symbol": symbol,
                 "quote": quote,
@@ -313,7 +309,6 @@ def index():
         except Exception as e:
             result = {"error": f"資料讀取錯誤: {e}"}
             logger.error(f"Processing error for symbol {symbol}: {e}")
-
     return render_template("index.html",
                            result=result,
                            symbol_input=symbol,
@@ -334,20 +329,18 @@ def create_checkout_session():
     if not tier:
         logger.error(f"Invalid tier requested: {tier_name}")
         return jsonify({"error": "Invalid tier"}), 400
-    
+   
     if tier["name"] == "Free":
         session["subscribed"] = False
         session["paid_tier"] = 0
         session["request_count"] = 0
         flash("✅ Switched to Free tier.", "success")
         return jsonify({"url": url_for("index", _external=True)})
-
     price_id = STRIPE_PRICE_IDS.get(tier_name)
     if not price_id or not validate_price_id(price_id, tier_name):
         logger.error(f"No valid Price ID configured for {tier_name}")
         flash(f"⚠️ Subscription for {tier_name} is currently unavailable.", "warning")
         return jsonify({"error": f"Subscription for {tier_name} is currently unavailable"}), 400
-
     try:
         logger.info(f"Creating Stripe checkout session for {tier_name} with Price ID: {price_id}")
         session_stripe = stripe.checkout.Session.create(
@@ -390,4 +383,3 @@ def reset():
 # ------------------ Run App ------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=True)
-
