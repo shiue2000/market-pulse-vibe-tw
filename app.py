@@ -1,3 +1,4 @@
+```python
 # -*- coding: utf-8 -*-
 import datetime
 import requests
@@ -15,6 +16,7 @@ from twstock import BestFourPoint as TwBestFourPoint
 
 # ------------------ Load environment ------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
 # Stripe keys
 STRIPE_TEST_SECRET_KEY = os.getenv("STRIPE_TEST_SECRET_KEY")
@@ -32,6 +34,8 @@ STRIPE_PRICE_IDS = {
 }
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY not set in environment variables")
+if not NEWSAPI_KEY:
+    logger.warning("⚠️ NEWSAPI_KEY not set; news fetching will be disabled")
 # Set Stripe keys
 if STRIPE_MODE == "live":
     STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
@@ -190,6 +194,45 @@ def get_company_profile(symbol):
         logger.error(f"Error fetching company profile for {symbol}: {e}")
         return {'name': 'N/A', 'group': '未知'}
 
+def get_stock_news(symbol, company_name, limit=5):
+    if not NEWSAPI_KEY:
+        logger.warning("NewsAPI key missing; skipping news fetch")
+        return []
+    try:
+        # Use company name for broader search, as symbol may be too specific
+        query = f"{company_name} OR {symbol} stock"
+        from_date = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
+        url = f"https://newsapi.org/v2/everything?q={query}&from={from_date}&language=en&sortBy=publishedAt&apiKey={NEWSAPI_KEY}"
+        # Filter for reputable sources
+        params = {
+            'sources': 'reuters,bloomberg,bbc-news',  # Add more trusted sources if needed
+            'q': query,
+            'from': from_date,
+            'language': 'en',  # English for broader coverage; adjust if TW-specific news is needed
+            'sortBy': 'publishedAt',
+            'apiKey': NEWSAPI_KEY
+        }
+        response = requests.get("https://newsapi.org/v2/everything", params=params)
+        response.raise_for_status()
+        data = response.json()
+        if data.get('status') != 'ok':
+            logger.warning(f"NewsAPI error: {data.get('message', 'Unknown error')}")
+            return []
+        articles = data.get('articles', [])[:limit]
+        news = [
+            {
+                'title': article.get('title', 'N/A'),
+                'url': article.get('url', '#'),
+                'published_at': article.get('publishedAt', 'N/A'),
+                'source': article.get('source', {}).get('name', 'Unknown')
+            }
+            for article in articles
+        ]
+        return news
+    except Exception as e:
+        logger.error(f"Error fetching news for {symbol}: {e}")
+        return []
+
 def calculate_rsi(series, period=14):
     delta = series.diff(1)
     gain = delta.where(delta > 0, 0)
@@ -255,8 +298,9 @@ def index():
             session["request_count"] = request_count + 1
             quote = get_quote(symbol)
             metrics = {}  # Skip, or use custom calculation if needed
-            news = []  # Skip news
             profile = get_company_profile(symbol)
+            company_name = profile.get('name', 'Unknown')
+            news = get_stock_news(symbol, company_name)  # Fetch news
             industry_zh = profile.get('group', '未知')
             industry_en = next((en for en, zh in industry_mapping.items() if zh == industry_zh), "Unknown")
             df, technical = get_historical_data(symbol)
@@ -290,16 +334,17 @@ def index():
                 "industry_en": industry_en,
                 "industry_zh": industry_zh,
                 "metrics": metrics,
-                "news": news,
+                "news": news,  # Include news in result
                 "gpt_analysis": gpt_analysis,
                 "plot_html": plot_html,
                 "technical": technical,
-                "profile": profile  # Ensure profile is included
+                "profile": profile
             }
         except Exception as e:
             result = {
                 "error": f"資料讀取錯誤: {e} / Data retrieval error: {e}",
-                "profile": {'name': 'N/A', 'group': '未知'}  # Provide default profile
+                "profile": {'name': 'N/A', 'group': '未知'},
+                "news": []  # Ensure news is included even in error case
             }
             logger.error(f"Processing error for symbol {symbol}: {e}")
     return render_template("index.html",
@@ -375,3 +420,4 @@ def reset():
 # ------------------ Run App ------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=True)
+```
