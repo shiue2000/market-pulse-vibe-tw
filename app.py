@@ -1,3 +1,4 @@
+```python
 # -*- coding: utf-8 -*-
 import datetime
 import requests
@@ -15,7 +16,7 @@ from twstock import BestFourPoint as TwBestFourPoint
 
 # ------------------ Load environment ------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "327ab6e463624447901ecee80b7dcb0b")  # Fallback to provided key
 SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
 # Stripe keys
 STRIPE_TEST_SECRET_KEY = os.getenv("STRIPE_TEST_SECRET_KEY")
@@ -34,7 +35,7 @@ STRIPE_PRICE_IDS = {
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY not set in environment variables")
 if not NEWSAPI_KEY:
-    logger.warning("⚠️ NEWSAPI_KEY not set; news fetching will be disabled")
+    logger.warning("⚠️ NEWSAPI_KEY not set; news fetching may be limited")
 # Set Stripe keys
 if STRIPE_MODE == "live":
     STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
@@ -198,17 +199,15 @@ def get_stock_news(symbol, company_name, limit=5):
         logger.warning("NewsAPI key missing; skipping news fetch")
         return []
     try:
-        # Use company name for broader search, as symbol may be too specific
+        # Use company name and symbol for search
         query = f"{company_name} OR {symbol} stock"
         from_date = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
-        url = f"https://newsapi.org/v2/everything?q={query}&from={from_date}&language=en&sortBy=publishedAt&apiKey={NEWSAPI_KEY}"
-        # Filter for reputable sources
         params = {
-            'sources': 'reuters,bloomberg,bbc-news',  # Add more trusted sources if needed
             'q': query,
             'from': from_date,
-            'language': 'en',  # English for broader coverage; adjust if TW-specific news is needed
             'sortBy': 'publishedAt',
+            'sources': 'reuters,bloomberg,bbc-news',  # Credible sources
+            'language': 'en',  # English for broader coverage; adjust for TW-specific if needed
             'apiKey': NEWSAPI_KEY
         }
         response = requests.get("https://newsapi.org/v2/everything", params=params)
@@ -227,6 +226,7 @@ def get_stock_news(symbol, company_name, limit=5):
             }
             for article in articles
         ]
+        logger.info(f"Fetched {len(news)} news articles for {symbol}")
         return news
     except Exception as e:
         logger.error(f"Error fetching news for {symbol}: {e}")
@@ -287,7 +287,8 @@ def index():
         if symbol not in twcodes:
             result = {
                 "error": f"無效的股票代號: {symbol} / Invalid stock symbol: {symbol}",
-                "profile": {'name': 'N/A', 'group': '未知'}
+                "profile": {'name': 'N/A', 'group': '未知'},
+                "news": []
             }
             return render_template("index.html", result=result, symbol_input=symbol,
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
@@ -333,7 +334,7 @@ def index():
                 "industry_en": industry_en,
                 "industry_zh": industry_zh,
                 "metrics": metrics,
-                "news": news,  # Include news in result
+                "news": news,
                 "gpt_analysis": gpt_analysis,
                 "plot_html": plot_html,
                 "technical": technical,
@@ -343,7 +344,7 @@ def index():
             result = {
                 "error": f"資料讀取錯誤: {e} / Data retrieval error: {e}",
                 "profile": {'name': 'N/A', 'group': '未知'},
-                "news": []  # Ensure news is included even in error case
+                "news": []
             }
             logger.error(f"Processing error for symbol {symbol}: {e}")
     return render_template("index.html",
@@ -419,3 +420,4 @@ def reset():
 # ------------------ Run App ------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=True)
+```
