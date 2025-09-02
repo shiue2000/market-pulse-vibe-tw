@@ -270,12 +270,12 @@ def get_stock_news(symbol, company_name, limit=10):
             "published_at": "publication date in YYYY-MM-DD format",
             "source": "source name"
         }}
-        Ensure the articles are in English or Chinese and are directly related to the company or stock.
+        Ensure the articles are in English or Chinese, directly related to the company or stock, and have valid URLs (not placeholder domains like example.com).
         """
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a financial news assistant capable of fetching and summarizing recent news articles. Provide accurate and relevant news data in JSON format."},
+                {"role": "system", "content": "You are a financial news assistant capable of fetching and summarizing recent news articles. Provide accurate and relevant news data in JSON format with valid URLs."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=2000,
@@ -284,8 +284,17 @@ def get_stock_news(symbol, company_name, limit=10):
         )
         news_data = json.loads(response['choices'][0]['message']['content'])
         news = news_data.get('articles', [])[:limit]
-        logger.info(f"Fetched {len(news)} news articles for {symbol}")
-        return news
+        # Filter out invalid URLs
+        valid_news = [
+            article for article in news
+            if article.get('url') and not any(
+                invalid in article['url'].lower() for invalid in ['example.com', 'example.org', 'example.net']
+            )
+        ]
+        if len(valid_news) < len(news):
+            logger.warning(f"Filtered out {len(news) - len(valid_news)} articles with invalid URLs for {symbol}")
+        logger.info(f"Fetched {len(valid_news)} news articles for {symbol}")
+        return valid_news
     except Exception as e:
         logger.error(f"Error fetching news for {symbol}: {e}", exc_info=True)
         return []
