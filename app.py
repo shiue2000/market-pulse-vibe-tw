@@ -12,12 +12,554 @@ import yfinance as yf
 import pandas as pd
 import json, os
 
-# Import Taiwan stock modules
-from proxy import get_proxies
-from analytics import Analytics, BestFourPoint
-from stock import Stock, TWSEFetcher, TPEXFetcher, DATATUPLE
-from realtime import get, get_raw
+# Taiwan stock modules integrated and modified
 
+# From proxy.py
+import abc
+from itertools import cycle
+
+class ProxyProvider(abc.ABC):
+    @abc.abstractmethod
+    def get_proxy(self):
+        return NotImplemented
+
+class NoProxyProvier(ProxyProvider):
+    def get_proxy(self):
+        return {}
+
+class SingleProxyProvider(ProxyProvider):
+    def __init__(self, proxy=None):
+        self._proxy = proxy
+
+    def get_proxy(self):
+        return self._proxy
+
+class RoundRobinProxiesProvider(ProxyProvider):
+    def __init__(self, proxies: list):
+        self._proxies = proxies
+        self._proxies_cycle = cycle(proxies)
+
+    @property
+    def proxies(self):
+        return self._proxies
+
+    @proxies.setter
+    def proxies(self, proxies: list):
+        if not isinstance(proxies, list):
+            raise ValueError("Proxies only accept list")
+
+        self._proxies = proxies
+        self._proxies_cycle = cycle(proxies)
+
+    def get_proxy(self):
+        return next(self._proxies_cycle)
+
+_provider_instance = NoProxyProvier()
+
+def reset_proxy_provider():
+    configure_proxy_provider(NoProxyProvier())
+
+def configure_proxy_provider(provider_instance):
+    global _provider_instance
+    if not isinstance(provider_instance, ProxyProvider):
+        raise BaseException("proxy provider should be a ProxyProvider object")
+    _provider_instance = provider_instance
+
+def get_proxies():
+    return _provider_instance.get_proxy()
+
+# From analytics.py
+class Analytics(object):
+    def continuous(self, data):
+        diff = [1 if data[-i] > data[-i - 1] else -1 for i in range(1, len(data))]
+        cont = 0
+        for v in diff:
+            if v == diff[0]:
+                cont += 1
+            else:
+                break
+        return cont * diff[0]
+
+    def moving_average(self, data, days):
+        result = []
+        data = data[:]
+        for _ in range(len(data) - days + 1):
+            result.append(round(sum(data[-days:]) / days, 2))
+            data.pop()
+        return result[::-1]
+
+    def ma_bias_ratio(self, day1, day2):
+        """Calculate moving average bias ratio"""
+        data1 = self.moving_average(self.price, day1)
+        data2 = self.moving_average(self.price, day2)
+        result = [
+            data1[-i] - data2[-i] for i in range(1, min(len(data1), len(data2)) + 1)
+        ]
+
+        return result[::-1]
+
+    def ma_bias_ratio_pivot(self, data, sample_size=5, position=False):
+        """Calculate pivot point"""
+        sample = data[-sample_size:]
+
+        if position is True:
+            check_value = max(sample)
+            pre_check_value = max(sample) > 0
+        elif position is False:
+            check_value = min(sample)
+            pre_check_value = max(sample) < 0
+
+        return (
+            (
+                sample_size - sample.index(check_value) < 4
+                and sample.index(check_value) != sample_size - 1
+                and pre_check_value
+            ),
+            sample_size - sample.index(check_value) - 1,
+            check_value,
+        )
+
+class BestFourPoint(object):
+    BEST_BUY_WHY = ["量大收紅", "量縮價不跌", "三日均價由下往上", "三日均價大於六日均價"]
+    BEST_SELL_WHY = ["量大收黑", "量縮價跌", "三日均價由上往下", "三日均價小於六日均價"]
+
+    def __init__(self, stock):
+        self.stock = stock
+
+    def bias_ratio(self, position=False):
+        return self.stock.ma_bias_ratio_pivot(
+            self.stock.ma_bias_ratio(3, 6), position=position
+        )
+
+    def plus_bias_ratio(self):
+        return self.bias_ratio(True)
+
+    def mins_bias_ratio(self):
+        return self.bias_ratio(False)
+
+    def best_buy_1(self):
+        return (
+            self.stock.capacity[-1] > self.stock.capacity[-2]
+            and self.stock.price[-1] > self.stock.open[-1]
+        )
+
+    def best_buy_2(self):
+        return (
+            self.stock.capacity[-1] < self.stock.capacity[-2]
+            and self.stock.price[-1] > self.stock.open[-2]
+        )
+
+    def best_buy_3(self):
+        return (
+            self.stock.continuous(self.stock.moving_average(self.stock.price, 3)) == 1
+        )
+
+    def best_buy_4(self):
+        return (
+            self.stock.moving_average(self.stock.price, 3)[-1]
+            > self.stock.moving_average(self.stock.price, 6)[-1]
+        )
+
+    def best_sell_1(self):
+        return (
+            self.stock.capacity[-1] > self.stock.capacity[-2]
+            and self.stock.price[-1] < self.stock.open[-1]
+        )
+
+    def best_sell_2(self):
+        return (
+            self.stock.capacity[-1] < self.stock.capacity[-2]
+            and self.stock.price[-1] < self.stock.open[-2]
+        )
+
+    def best_sell_3(self):
+        return (
+            self.stock.continuous(self.stock.moving_average(self.stock.price, 3)) == -1
+        )
+
+    def best_sell_4(self):
+        return (
+            self.stock.moving_average(self.stock.price, 3)[-1]
+            < self.stock.moving_average(self.stock.price, 6)[-1]
+        )
+
+    def best_four_point_to_buy(self):
+        result = []
+        check = [
+            self.best_buy_1(),
+            self.best_buy_2(),
+            self.best_buy_3(),
+            self.best_buy_4(),
+        ]
+        if self.mins_bias_ratio() and any(check):
+            for index, v in enumerate(check):
+                if v:
+                    result.append(self.BEST_BUY_WHY[index])
+        else:
+            return False
+        return ", ".join(result)
+
+    def best_four_point_to_sell(self):
+        result = []
+        check = [
+            self.best_sell_1(),
+            self.best_sell_2(),
+            self.best_sell_3(),
+            self.best_sell_4(),
+        ]
+        if self.plus_bias_ratio() and any(check):
+            for index, v in enumerate(check):
+                if v:
+                    result.append(self.BEST_SELL_WHY[index])
+        else:
+            return False
+        return ", ".join(result)
+
+    def best_four_point(self):
+        buy = self.best_four_point_to_buy()
+        sell = self.best_four_point_to_sell()
+        if buy:
+            return (True, buy)
+        elif sell:
+            return (False, sell)
+
+        return None
+
+# From stock.py, modified to not require codes.py
+import datetime
+import urllib.parse
+from collections import namedtuple
+try:
+    from json.decoder import JSONDecodeError
+except ImportError:
+    JSONDecodeError = ValueError
+import requests
+
+TWSE_BASE_URL = "http://www.twse.com.tw/"
+TPEX_BASE_URL = "http://www.tpex.org.tw/"
+DATATUPLE = namedtuple(
+    "Data",
+    [
+        "date",
+        "capacity",
+        "turnover",
+        "open",
+        "high",
+        "low",
+        "close",
+        "change",
+        "transaction",
+    ],
+)
+
+class BaseFetcher(object):
+    def fetch(self, year, month, sid, retry):
+        pass
+
+    def _convert_date(self, date):
+        """Convert '106/05/01' to '2017/05/01'"""
+        return "/".join([str(int(date.split("/")[0]) + 1911)] + date.split("/")[1:])
+
+    def _make_datatuple(self, data):
+        pass
+
+    def purify(self, original_data):
+        pass
+
+class TWSEFetcher(BaseFetcher):
+    REPORT_URL = urllib.parse.urljoin(TWSE_BASE_URL, "exchangeReport/STOCK_DAY")
+
+    def __init__(self):
+        pass
+
+    def fetch(self, year: int, month: int, sid: str, retry: int = 5):
+        params = {"date": "%d%02d01" % (year, month), "stockNo": sid}
+        for retry_i in range(retry):
+            r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies())
+            try:
+                data = r.json()
+            except JSONDecodeError:
+                continue
+            else:
+                break
+        else:
+            data = {"stat": "", "data": []}
+
+        if data["stat"] == "OK":
+            data["data"] = self.purify(data)
+        else:
+            data["data"] = []
+        return data
+
+    def _make_datatuple(self, data):
+        data[0] = datetime.datetime.strptime(self._convert_date(data[0]), "%Y/%m/%d")
+        data[1] = int(data[1].replace(",", ""))
+        data[2] = int(data[2].replace(",", ""))
+        data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
+        data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
+        data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
+        data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
+        data[7] = float(
+            0.0 if data[7].replace(",", "") == "X0.00" else data[7].replace(",", "")
+        )
+        data[8] = int(data[8].replace(",", ""))
+        return DATATUPLE(*data)
+
+    def purify(self, original_data):
+        return [self._make_datatuple(d) for d in original_data["data"]]
+
+class TPEXFetcher(BaseFetcher):
+    REPORT_URL = urllib.parse.urljoin(
+        TPEX_BASE_URL, "web/stock/aftertrading/daily_trading_info/st43_result.php"
+    )
+
+    def __init__(self):
+        pass
+
+    def fetch(self, year: int, month: int, sid: str, retry: int = 5):
+        params = {"d": "%d/%d" % (year - 1911, month), "stkno": sid}
+        for retry_i in range(retry):
+            r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies())
+            try:
+                data = r.json()
+            except JSONDecodeError:
+                continue
+            else:
+                break
+        else:
+            data = {"aaData": []}
+
+        data["data"] = []
+        if data["aaData"]:
+            data["data"] = self.purify(data)
+        return data
+
+    def _convert_date(self, date):
+        """Convert '106/05/01' to '2017/05/01'"""
+        return "/".join([str(int(date.split("/")[0]) + 1911)] + date.split("/")[1:])
+
+    def _make_datatuple(self, data):
+        data[0] = datetime.datetime.strptime(
+            self._convert_date(data[0].replace("＊", "")), "%Y/%m/%d"
+        )
+        data[1] = int(data[1].replace(",", "")) * 1000
+        data[2] = int(data[2].replace(",", "")) * 1000
+        data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
+        data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
+        data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
+        data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
+        data[7] = float(data[7].replace(",", ""))
+        data[8] = int(data[8].replace(",", ""))
+        return DATATUPLE(*data)
+
+    def purify(self, original_data):
+        return [self._make_datatuple(d) for d in original_data["aaData"]]
+
+class Stock(Analytics):
+    def __init__(self, sid: str, initial_fetch: bool = True):
+        self.sid = sid
+        self.fetcher = None  # Start with None, determine dynamically
+        self.raw_data = []
+        self.data = []
+
+        if initial_fetch:
+            self.fetch_31()
+
+    def _month_year_iter(self, start_month, start_year, end_month, end_year):
+        ym_start = 12 * start_year + start_month - 1
+        ym_end = 12 * end_year + end_month
+        for ym in range(ym_start, ym_end):
+            y, m = divmod(ym, 12)
+            yield y, m + 1
+
+    def fetch(self, year: int, month: int):
+        """Fetch year month data"""
+        self.raw_data = []
+        self.data = []
+
+        # Try TWSE first
+        self.fetcher = TWSEFetcher()
+        fetched_data = self.fetcher.fetch(year, month, self.sid)
+        self.raw_data = [fetched_data]
+        self.data = fetched_data["data"]
+
+        # If no data, try TPEX
+        if not self.data:
+            self.fetcher = TPEXFetcher()
+            fetched_data = self.fetcher.fetch(year, month, self.sid)
+            self.raw_data = [fetched_data]
+            self.data = fetched_data["data"]
+
+        return self.data
+
+    def fetch_from(self, year: int, month: int):
+        """Fetch data from year, month to current year month data"""
+        self.raw_data = []
+        self.data = []
+        today = datetime.datetime.today()
+        for y, m in self._month_year_iter(month, year, today.month, today.year):
+            self.fetch(y, m)
+            self.raw_data.append(self.raw_data[-1])  # Append the last raw
+            self.data.extend(self.data)  # Extend with new data
+        return self.data
+
+    def fetch_31(self):
+        """Fetch 31 days data"""
+        today = datetime.datetime.today()
+        before = today - datetime.timedelta(days=60)
+        self.fetch_from(before.year, before.month)
+        self.data = self.data[-31:]
+        return self.data
+
+    @property
+    def date(self):
+        return [d.date for d in self.data if d.date is not None]
+
+    @property
+    def capacity(self):
+        return [d.capacity for d in self.data if d.capacity is not None]
+
+    @property
+    def turnover(self):
+        return [d.turnover for d in self.data if d.turnover is not None]
+
+    @property
+    def price(self):
+        return [d.close for d in self.data if d.close is not None]
+
+    @property
+    def high(self):
+        return [d.high for d in self.data if d.high is not None]
+
+    @property
+    def low(self):
+        return [d.low for d in self.data if d.low is not None]
+
+    @property
+    def open(self):
+        return [d.open for d in self.data if d.open is not None]
+
+    @property
+    def close(self):
+        return [d.close for d in self.data if d.close is not None]
+
+    @property
+    def change(self):
+        return [d.change for d in self.data if d.change is not None]
+
+    @property
+    def transaction(self):
+        return [d.transaction for d in self.data if d.transaction is not None]
+
+# From realtime.py, with minor fixes for handling
+import datetime
+import json
+import time
+import requests
+import sys
+
+SESSION_URL = "http://mis.twse.com.tw/stock/index.jsp"
+STOCKINFO_URL = (
+    "http://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={stock_id}&_={time}"
+)
+
+mock = False
+
+def _format_stock_info(data) -> dict:
+    result = {"timestamp": 0.0, "info": {}, "realtime": {}}
+
+    try:
+        result["timestamp"] = int(data["tlong"]) / 1000
+    except:
+        result["timestamp"] = 0.0
+
+    result["info"]["code"] = data.get("c", "")
+    result["info"]["channel"] = data.get("ch", "")
+    result["info"]["name"] = data.get("n", "")
+    result["info"]["fullname"] = data.get("nf", "")
+    result["info"]["time"] = datetime.datetime.fromtimestamp(
+        result["timestamp"]
+    ).strftime("%Y-%m-%d %H:%M:%S") if result["timestamp"] else ""
+
+    def _split_best(d):
+        if d:
+            return d.strip("_").split("_")
+        return []
+
+    rt = result["realtime"]
+    rt["latest_trade_price"] = data.get("z", "--")
+    rt["trade_volume"] = data.get("tv", "--")
+    rt["accumulate_trade_volume"] = data.get("v", "--")
+    rt["best_bid_price"] = _split_best(data.get("b", ""))
+    rt["best_bid_volume"] = _split_best(data.get("g", ""))
+    rt["best_ask_price"] = _split_best(data.get("a", ""))
+    rt["best_ask_volume"] = _split_best(data.get("f", ""))
+    rt["open"] = data.get("o", "--")
+    rt["high"] = data.get("h", "--")
+    rt["low"] = data.get("l", "--")
+    rt["previous_close"] = data.get("y", "--")
+
+    result["success"] = True
+
+    return result
+
+def _join_stock_id(stocks, prefix='tse'):
+    if isinstance(stocks, list):
+        return "|".join([f"{prefix}_{s}.tw" for s in stocks])
+    return f"{prefix}_{stocks}.tw"
+
+def get_raw(stocks) -> dict:
+    req = requests.Session()
+    req.get(SESSION_URL, proxies=get_proxies())
+
+    data = {"rtmessage": "Empty Query.", "rtcode": "5001"}
+
+    for prefix in ['tse', 'otc']:
+        stock_id = _join_stock_id(stocks, prefix)
+        r = req.get(
+            STOCKINFO_URL.format(
+                stock_id=stock_id, time=int(time.time()) * 1000
+            )
+        )
+        try:
+            data = r.json()
+            if "msgArray" in data and len(data["msgArray"]) > 0:
+                break
+        except:
+            continue
+
+    return data
+
+def get(stocks, retry=3):
+    data = get_raw(stocks)
+    data["success"] = False
+
+    if data.get("rtcode") == "5000":
+        if retry:
+            return get(stocks, retry - 1)
+        return data
+
+    if "msgArray" not in data:
+        return data
+
+    if not len(data["msgArray"]):
+        data["rtmessage"] = "Empty Query."
+        data["rtcode"] = "5001"
+        return data
+
+    if isinstance(stocks, list):
+        result = {
+            d["c"]: _format_stock_info(d)
+            for d in data["msgArray"]
+        }
+        result["success"] = True
+        return result
+
+    formatted = _format_stock_info(data["msgArray"][0])
+    formatted["success"] = True
+    return formatted
+
+# Flask app code
 # ------------------ Load environment ------------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -291,8 +833,8 @@ def get_historical_data(symbol, is_taiwan=False):
         window_50 = min(50, len(df))
         ma50 = df['Close'].rolling(window=window_50).mean().iloc[-1] if len(df) >= 1 else 'N/A'
         rsi = calculate_rsi(df['Close'])
-        ema12 = df['Close'].ewm(span=12, adjust=False).mean().iloc[-1] if len(df) >= 12 else 'N/A'
-        ema26 = df['Close'].ewm(span=26, adjust=False).mean().iloc[-1] if len(df) >= 26 else 'N/A'
+        ema12 = df['Close'].ewm(span=12, adjust=False).mean().iloc[-1] if len(df) >= 1 else 'N/A'
+        ema26 = df['Close'].ewm(span=26, adjust=False).mean().iloc[-1] if len(df) >= 1 else 'N/A'
         macd = ema12 - ema26 if pd.notnull(ema12) and pd.notnull(ema26) else 'N/A'
         tail_20 = min(20, len(df))
         support = df['Low'].tail(tail_20).min() if len(df) >= 1 else 'N/A'
