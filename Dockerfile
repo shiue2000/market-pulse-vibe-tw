@@ -1,14 +1,18 @@
-FROM python:3.10-slim
+# Use Python 3.10 base image
+FROM python:3.10
 
+# Set working directory
 WORKDIR /app
 
+# Copy requirements.txt and install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install gunicorn==20.1.0
 
+# Copy application code
 COPY . .
 
-ENV PORT=8080
+# Expose port 8080
 EXPOSE 8080
 
-CMD ["python", ""app.py"]
+# Run Gunicorn
+CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:8080", "--log-level=info", "app:app"]
