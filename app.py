@@ -11,19 +11,19 @@ import time
 import yfinance as yf
 import pandas as pd
 import json, os
+import urllib.parse
+from collections import namedtuple
+try:
+    from json.decoder import JSONDecodeError
+except ImportError:
+    JSONDecodeError = ValueError
 
-# Taiwan stock modules integrated and modified
-
-# From proxy.py
-import abc
-from itertools import cycle
-
-class ProxyProvider(abc.ABC):
-    @abc.abstractmethod
+# Proxy module
+class ProxyProvider:
     def get_proxy(self):
         return NotImplemented
 
-class NoProxyProvier(ProxyProvider):
+class NoProxyProvider(ProxyProvider):
     def get_proxy(self):
         return {}
 
@@ -47,17 +47,16 @@ class RoundRobinProxiesProvider(ProxyProvider):
     def proxies(self, proxies: list):
         if not isinstance(proxies, list):
             raise ValueError("Proxies only accept list")
-
         self._proxies = proxies
         self._proxies_cycle = cycle(proxies)
 
     def get_proxy(self):
         return next(self._proxies_cycle)
 
-_provider_instance = NoProxyProvier()
+_provider_instance = NoProxyProvider()
 
 def reset_proxy_provider():
-    configure_proxy_provider(NoProxyProvier())
+    configure_proxy_provider(NoProxyProvider())
 
 def configure_proxy_provider(provider_instance):
     global _provider_instance
@@ -68,7 +67,7 @@ def configure_proxy_provider(provider_instance):
 def get_proxies():
     return _provider_instance.get_proxy()
 
-# From analytics.py
+# Analytics module
 class Analytics(object):
     def continuous(self, data):
         diff = [1 if data[-i] > data[-i - 1] else -1 for i in range(1, len(data))]
@@ -89,26 +88,19 @@ class Analytics(object):
         return result[::-1]
 
     def ma_bias_ratio(self, day1, day2):
-        """Calculate moving average bias ratio"""
         data1 = self.moving_average(self.price, day1)
         data2 = self.moving_average(self.price, day2)
-        result = [
-            data1[-i] - data2[-i] for i in range(1, min(len(data1), len(data2)) + 1)
-        ]
-
+        result = [data1[-i] - data2[-i] for i in range(1, min(len(data1), len(data2)) + 1)]
         return result[::-1]
 
     def ma_bias_ratio_pivot(self, data, sample_size=5, position=False):
-        """Calculate pivot point"""
         sample = data[-sample_size:]
-
         if position is True:
             check_value = max(sample)
             pre_check_value = max(sample) > 0
         elif position is False:
             check_value = min(sample)
             pre_check_value = max(sample) < 0
-
         return (
             (
                 sample_size - sample.index(check_value) < 4
@@ -127,9 +119,7 @@ class BestFourPoint(object):
         self.stock = stock
 
     def bias_ratio(self, position=False):
-        return self.stock.ma_bias_ratio_pivot(
-            self.stock.ma_bias_ratio(3, 6), position=position
-        )
+        return self.stock.ma_bias_ratio_pivot(self.stock.ma_bias_ratio(3, 6), position=position)
 
     def plus_bias_ratio(self):
         return self.bias_ratio(True)
@@ -150,9 +140,7 @@ class BestFourPoint(object):
         )
 
     def best_buy_3(self):
-        return (
-            self.stock.continuous(self.stock.moving_average(self.stock.price, 3)) == 1
-        )
+        return self.stock.continuous(self.stock.moving_average(self.stock.price, 3)) == 1
 
     def best_buy_4(self):
         return (
@@ -173,9 +161,7 @@ class BestFourPoint(object):
         )
 
     def best_sell_3(self):
-        return (
-            self.stock.continuous(self.stock.moving_average(self.stock.price, 3)) == -1
-        )
+        return self.stock.continuous(self.stock.moving_average(self.stock.price, 3)) == -1
 
     def best_sell_4(self):
         return (
@@ -222,34 +208,14 @@ class BestFourPoint(object):
             return (True, buy)
         elif sell:
             return (False, sell)
-
         return None
 
-# From stock.py, modified to not require codes.py
-import datetime
-import urllib.parse
-from collections import namedtuple
-try:
-    from json.decoder import JSONDecodeError
-except ImportError:
-    JSONDecodeError = ValueError
-import requests
-
+# Stock module
 TWSE_BASE_URL = "http://www.twse.com.tw/"
 TPEX_BASE_URL = "http://www.tpex.org.tw/"
 DATATUPLE = namedtuple(
     "Data",
-    [
-        "date",
-        "capacity",
-        "turnover",
-        "open",
-        "high",
-        "low",
-        "close",
-        "change",
-        "transaction",
-    ],
+    ["date", "capacity", "turnover", "open", "high", "low", "close", "change", "transaction"],
 )
 
 class BaseFetcher(object):
@@ -257,7 +223,6 @@ class BaseFetcher(object):
         pass
 
     def _convert_date(self, date):
-        """Convert '106/05/01' to '2017/05/01'"""
         return "/".join([str(int(date.split("/")[0]) + 1911)] + date.split("/")[1:])
 
     def _make_datatuple(self, data):
@@ -269,99 +234,87 @@ class BaseFetcher(object):
 class TWSEFetcher(BaseFetcher):
     REPORT_URL = urllib.parse.urljoin(TWSE_BASE_URL, "exchangeReport/STOCK_DAY")
 
-    def __init__(self):
-        pass
-
     def fetch(self, year: int, month: int, sid: str, retry: int = 5):
         params = {"date": "%d%02d01" % (year, month), "stockNo": sid}
         for retry_i in range(retry):
-            r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies())
             try:
+                r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies(), timeout=10)
+                r.raise_for_status()
                 data = r.json()
-            except JSONDecodeError:
-                continue
-            else:
-                break
-        else:
-            data = {"stat": "", "data": []}
-
-        if data["stat"] == "OK":
-            data["data"] = self.purify(data)
-        else:
-            data["data"] = []
-        return data
+                if data.get("stat") == "OK":
+                    data["data"] = self.purify(data)
+                    return data
+            except (JSONDecodeError, requests.RequestException) as e:
+                logger.warning(f"[TWSE Fetch Error] Attempt {retry_i + 1} for {sid}: {e}")
+                time.sleep(3)
+        logger.error(f"[TWSE Fetch Error] Failed to fetch data for {sid} after {retry} attempts")
+        return {"stat": "", "data": []}
 
     def _make_datatuple(self, data):
-        data[0] = datetime.datetime.strptime(self._convert_date(data[0]), "%Y/%m/%d")
-        data[1] = int(data[1].replace(",", ""))
-        data[2] = int(data[2].replace(",", ""))
-        data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
-        data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
-        data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
-        data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
-        data[7] = float(
-            0.0 if data[7].replace(",", "") == "X0.00" else data[7].replace(",", "")
-        )
-        data[8] = int(data[8].replace(",", ""))
-        return DATATUPLE(*data)
+        try:
+            data[0] = datetime.datetime.strptime(self._convert_date(data[0]), "%Y/%m/%d")
+            data[1] = int(data[1].replace(",", ""))
+            data[2] = int(data[2].replace(",", ""))
+            data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
+            data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
+            data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
+            data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
+            data[7] = float(0.0 if data[7].replace(",", "") == "X0.00" else data[7].replace(",", ""))
+            data[8] = int(data[8].replace(",", ""))
+            return DATATUPLE(*data)
+        except Exception as e:
+            logger.error(f"[TWSE Parse Error] Failed to parse data: {e}")
+            return None
 
     def purify(self, original_data):
-        return [self._make_datatuple(d) for d in original_data["data"]]
+        return [d for d in (self._make_datatuple(d) for d in original_data["data"]) if d is not None]
 
 class TPEXFetcher(BaseFetcher):
-    REPORT_URL = urllib.parse.urljoin(
-        TPEX_BASE_URL, "web/stock/aftertrading/daily_trading_info/st43_result.php"
-    )
-
-    def __init__(self):
-        pass
+    REPORT_URL = urllib.parse.urljoin(TPEX_BASE_URL, "web/stock/aftertrading/daily_trading_info/st43_result.php")
 
     def fetch(self, year: int, month: int, sid: str, retry: int = 5):
         params = {"d": "%d/%d" % (year - 1911, month), "stkno": sid}
         for retry_i in range(retry):
-            r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies())
             try:
+                r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies(), timeout=10)
+                r.raise_for_status()
                 data = r.json()
-            except JSONDecodeError:
-                continue
-            else:
-                break
-        else:
-            data = {"aaData": []}
-
-        data["data"] = []
-        if data["aaData"]:
-            data["data"] = self.purify(data)
-        return data
+                data["data"] = self.purify(data) if data.get("aaData") else []
+                return data
+            except (JSONDecodeError, requests.RequestException) as e:
+                logger.warning(f"[TPEX Fetch Error] Attempt {retry_i + 1} for {sid}: {e}")
+                time.sleep(3)
+        logger.error(f"[TPEX Fetch Error] Failed to fetch data for {sid} after {retry} attempts")
+        return {"aaData": [], "data": []}
 
     def _convert_date(self, date):
-        """Convert '106/05/01' to '2017/05/01'"""
         return "/".join([str(int(date.split("/")[0]) + 1911)] + date.split("/")[1:])
 
     def _make_datatuple(self, data):
-        data[0] = datetime.datetime.strptime(
-            self._convert_date(data[0].replace("＊", "")), "%Y/%m/%d"
-        )
-        data[1] = int(data[1].replace(",", "")) * 1000
-        data[2] = int(data[2].replace(",", "")) * 1000
-        data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
-        data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
-        data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
-        data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
-        data[7] = float(data[7].replace(",", ""))
-        data[8] = int(data[8].replace(",", ""))
-        return DATATUPLE(*data)
+        try:
+            data[0] = datetime.datetime.strptime(self._convert_date(data[0].replace("＊", "")), "%Y/%m/%d")
+            data[1] = int(data[1].replace(",", "")) * 1000
+            data[2] = int(data[2].replace(",", "")) * 1000
+            data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
+            data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
+            data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
+            data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
+            data[7] = float(data[7].replace(",", ""))
+            data[8] = int(data[8].replace(",", ""))
+            return DATATUPLE(*data)
+        except Exception as e:
+            logger.error(f"[TPEX Parse Error] Failed to parse data: {e}")
+            return None
 
     def purify(self, original_data):
-        return [self._make_datatuple(d) for d in original_data["aaData"]]
+        return [d for d in (self._make_datatuple(d) for d in original_data["aaData"]) if d is not None]
 
 class Stock(Analytics):
     def __init__(self, sid: str, initial_fetch: bool = True):
         self.sid = sid
-        self.fetcher = None  # Start with None, determine dynamically
+        self.fetcher = None
         self.raw_data = []
         self.data = []
-
         if initial_fetch:
             self.fetch_31()
 
@@ -373,38 +326,32 @@ class Stock(Analytics):
             yield y, m + 1
 
     def fetch(self, year: int, month: int):
-        """Fetch year month data"""
         self.raw_data = []
         self.data = []
-
-        # Try TWSE first
-        self.fetcher = TWSEFetcher()
-        fetched_data = self.fetcher.fetch(year, month, self.sid)
-        self.raw_data = [fetched_data]
-        self.data = fetched_data["data"]
-
-        # If no data, try TPEX
-        if not self.data:
-            self.fetcher = TPEXFetcher()
-            fetched_data = self.fetcher.fetch(year, month, self.sid)
-            self.raw_data = [fetched_data]
-            self.data = fetched_data["data"]
-
+        fetchers = [TWSEFetcher(), TPEXFetcher()]
+        for fetcher in fetchers:
+            self.fetcher = fetcher
+            fetched_data = self.fetcher.fetch(year, month, self.sid, retry=5)
+            if fetched_data.get("data"):
+                self.raw_data = [fetched_data]
+                self.data = fetched_data["data"]
+                logger.info(f"Successfully fetched data for {self.sid} using {fetcher.__class__.__name__}")
+                break
+        else:
+            logger.error(f"No data fetched for {self.sid} from either TWSE or TPEX")
         return self.data
 
     def fetch_from(self, year: int, month: int):
-        """Fetch data from year, month to current year month data"""
         self.raw_data = []
         self.data = []
         today = datetime.datetime.today()
         for y, m in self._month_year_iter(month, year, today.month, today.year):
             self.fetch(y, m)
-            self.raw_data.append(self.raw_data[-1])  # Append the last raw
-            self.data.extend(self.data)  # Extend with new data
+            self.raw_data.append(self.raw_data[-1] if self.raw_data else {"data": []})
+            self.data.extend(self.data)
         return self.data
 
     def fetch_31(self):
-        """Fetch 31 days data"""
         today = datetime.datetime.today()
         before = today - datetime.timedelta(days=60)
         self.fetch_from(before.year, before.month)
@@ -451,41 +398,27 @@ class Stock(Analytics):
     def transaction(self):
         return [d.transaction for d in self.data if d.transaction is not None]
 
-# From realtime.py, with minor fixes for handling
-import datetime
-import json
-import time
-import requests
-import sys
-
+# Realtime module
 SESSION_URL = "http://mis.twse.com.tw/stock/index.jsp"
-STOCKINFO_URL = (
-    "http://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={stock_id}&_={time}"
-)
+STOCKINFO_URL = "http://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={stock_id}&_={time}"
 
-mock = False
-
-def _format_stock_info(data) -> dict:
+def _format_stock_info(data):
     result = {"timestamp": 0.0, "info": {}, "realtime": {}}
-
     try:
         result["timestamp"] = int(data["tlong"]) / 1000
     except:
         result["timestamp"] = 0.0
-
     result["info"]["code"] = data.get("c", "")
     result["info"]["channel"] = data.get("ch", "")
     result["info"]["name"] = data.get("n", "")
     result["info"]["fullname"] = data.get("nf", "")
-    result["info"]["time"] = datetime.datetime.fromtimestamp(
-        result["timestamp"]
-    ).strftime("%Y-%m-%d %H:%M:%S") if result["timestamp"] else ""
-
+    result["info"]["time"] = (
+        datetime.datetime.fromtimestamp(result["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+        if result["timestamp"]
+        else ""
+    )
     def _split_best(d):
-        if d:
-            return d.strip("_").split("_")
-        return []
-
+        return d.strip("_").split("_") if d else []
     rt = result["realtime"]
     rt["latest_trade_price"] = data.get("z", "--")
     rt["trade_volume"] = data.get("tv", "--")
@@ -498,9 +431,7 @@ def _format_stock_info(data) -> dict:
     rt["high"] = data.get("h", "--")
     rt["low"] = data.get("l", "--")
     rt["previous_close"] = data.get("y", "--")
-
     result["success"] = True
-
     return result
 
 def _join_stock_id(stocks, prefix='tse'):
@@ -508,69 +439,54 @@ def _join_stock_id(stocks, prefix='tse'):
         return "|".join([f"{prefix}_{s}.tw" for s in stocks])
     return f"{prefix}_{stocks}.tw"
 
-def get_raw(stocks) -> dict:
+def get_raw(stocks):
     req = requests.Session()
-    req.get(SESSION_URL, proxies=get_proxies())
-
+    try:
+        r = req.get(SESSION_URL, proxies=get_proxies(), timeout=10)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        logger.error(f"[TWSE Session Error] Failed to initialize session: {e}")
+        return {"rtmessage": "Session initialization failed", "rtcode": "5002"}
     data = {"rtmessage": "Empty Query.", "rtcode": "5001"}
-
     for prefix in ['tse', 'otc']:
         stock_id = _join_stock_id(stocks, prefix)
-        r = req.get(
-            STOCKINFO_URL.format(
-                stock_id=stock_id, time=int(time.time()) * 1000
-            )
-        )
         try:
+            r = req.get(STOCKINFO_URL.format(stock_id=stock_id, time=int(time.time()) * 1000), timeout=10)
+            r.raise_for_status()
             data = r.json()
             if "msgArray" in data and len(data["msgArray"]) > 0:
                 break
-        except:
-            continue
-
+        except (JSONDecodeError, requests.RequestException) as e:
+            logger.warning(f"[TWSE Realtime Error] Failed for {prefix}_{stocks}.tw: {e}")
+            time.sleep(3)
     return data
 
 def get(stocks, retry=3):
-    data = get_raw(stocks)
+    for attempt in range(retry):
+        data = get_raw(stocks)
+        if data.get("rtcode") == "5000" and "msgArray" in data and len(data["msgArray"]) > 0:
+            if isinstance(stocks, list):
+                result = {d["c"]: _format_stock_info(d) for d in data["msgArray"]}
+                result["success"] = True
+                return result
+            formatted = _format_stock_info(data["msgArray"][0])
+            formatted["success"] = True
+            return formatted
+        logger.warning(f"[Realtime Retry] Attempt {attempt + 1} failed for {stocks}: {data.get('rtmessage', 'No message')}")
+        time.sleep(3)
     data["success"] = False
+    data["rtmessage"] = data.get("rtmessage", "Failed to fetch data after retries")
+    return data
 
-    if data.get("rtcode") == "5000":
-        if retry:
-            return get(stocks, retry - 1)
-        return data
-
-    if "msgArray" not in data:
-        return data
-
-    if not len(data["msgArray"]):
-        data["rtmessage"] = "Empty Query."
-        data["rtcode"] = "5001"
-        return data
-
-    if isinstance(stocks, list):
-        result = {
-            d["c"]: _format_stock_info(d)
-            for d in data["msgArray"]
-        }
-        result["success"] = True
-        return result
-
-    formatted = _format_stock_info(data["msgArray"][0])
-    formatted["success"] = True
-    return formatted
-
-# Flask app code
-# ------------------ Load environment ------------------
+# Flask app
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
-# Stripe keys
 STRIPE_TEST_SECRET_KEY = os.getenv("STRIPE_TEST_SECRET_KEY")
 STRIPE_TEST_PUBLISHABLE_KEY = os.getenv("STRIPE_TEST_PUBLISHABLE_KEY")
 STRIPE_LIVE_SECRET_KEY = os.getenv("STRIPE_LIVE_SECRET_KEY")
 STRIPE_LIVE_PUBLISHABLE_KEY = os.getenv("STRIPE_LIVE_PUBLISHABLE_KEY")
 STRIPE_MODE = os.getenv("STRIPE_MODE", "test").lower()
-# Stripe Price IDs
 STRIPE_PRICE_IDS = {
     "Free": os.getenv("STRIPE_PRICE_TIER0"),
     "Tier 1": os.getenv("STRIPE_PRICE_TIER1"),
@@ -580,7 +496,6 @@ STRIPE_PRICE_IDS = {
 }
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY not set in .env")
-# Set Stripe keys
 if STRIPE_MODE == "live":
     STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
     STRIPE_PUBLISHABLE_KEY = STRIPE_LIVE_PUBLISHABLE_KEY
@@ -591,16 +506,13 @@ if not STRIPE_SECRET_KEY or not STRIPE_PUBLISHABLE_KEY:
     raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in .env")
 stripe.api_key = STRIPE_SECRET_KEY
 
-# ------------------ Logger setup ------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ------------------ Initialize Flask & OpenAI ------------------
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 openai.api_key = OPENAI_API_KEY
 
-# ------------------ Stock app config ------------------
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 industry_mapping = {
     "Technology": "科技業",
@@ -639,8 +551,6 @@ QUOTE_FIELDS = {
     "daily_change": ("漲跌幅(%)", "Change Percent"),
     "volume": ("交易量", "Volume")
 }
-
-# ------------------ Stripe pricing tiers ------------------
 PRICING_TIERS = [
     {"name": "Free", "limit": 50, "price": 0},
     {"name": "Tier 1", "limit": 100, "price": 9.99},
@@ -649,7 +559,6 @@ PRICING_TIERS = [
     {"name": "Tier 4", "limit": 800, "price": 39.99},
 ]
 
-# ------------------ Helper functions ------------------
 def validate_price_id(price_id, tier_name):
     return bool(price_id)
 
@@ -658,22 +567,36 @@ def get_finnhub_json(endpoint, params):
     params["token"] = FINNHUB_API_KEY
     for attempt in range(3):
         try:
-            r = requests.get(url, params=params, timeout=5)
+            r = requests.get(url, params=params, timeout=10)
             r.raise_for_status()
             return r.json()
         except Exception as e:
             logger.warning(f"[Finnhub Error] Attempt {attempt + 1} for {endpoint}: {e}")
-            time.sleep(2)
+            time.sleep(3)
     logger.error(f"[Finnhub Error] Failed to fetch {endpoint} after 3 attempts")
     return {}
 
 def get_quote(symbol, is_taiwan=False):
     if is_taiwan:
         try:
-            data = get(symbol)
+            data = get(symbol, retry=5)
             if not data.get('success') or 'realtime' not in data:
                 logger.error(f"Taiwan stock data fetch failed for {symbol}: {data.get('rtmessage', 'No data')}")
-                return {}
+                # Fallback to Finnhub
+                logger.info(f"Attempting Finnhub fallback for {symbol}.TW")
+                data = get_finnhub_json("quote", {"symbol": f"{symbol}.TW"})
+                if not data or 'c' not in data:
+                    logger.error(f"Finnhub fallback failed for {symbol}.TW: {data}")
+                    return {}
+                return {
+                    'current_price': round(data.get('c', 'N/A'), 4),
+                    'open': round(data.get('o', 'N/A'), 4),
+                    'high': round(data.get('h', 'N/A'), 4),
+                    'low': round(data.get('l', 'N/A'), 4),
+                    'previous_close': round(data.get('pc', 'N/A'), 4),
+                    'daily_change': round(data.get('dp', 'N/A'), 4),
+                    'volume': int(data.get('v', 'N/A')) if data.get('v') and data.get('v') != 'N/A' else 'N/A'
+                }
             rt = data['realtime']
             current = rt['latest_trade_price'] if rt['latest_trade_price'] and rt['latest_trade_price'] != '--' else None
             prev = rt.get('previous_close') if rt.get('previous_close') and rt.get('previous_close') != '--' else None
@@ -822,10 +745,10 @@ def get_historical_data(symbol, is_taiwan=False):
                     df = yf.download(symbol, period="1y", progress=False)
                     if not df.empty:
                         break
-                    time.sleep(2)
+                    time.sleep(3)
                 except Exception as e:
                     logger.warning(f"[YF Historical Error] Attempt {attempt + 1} for {symbol}: {e}")
-                    time.sleep(2)
+                    time.sleep(3)
             if df.empty:
                 logger.warning(f"No historical data for {symbol}")
                 return pd.DataFrame(), {}
@@ -874,7 +797,6 @@ def get_plot_html(df, symbol, currency="TWD"):
         logger.error(f"Error generating plot for {symbol}: {e}")
         return "<p class='text-danger'>📊 無法生成股價趨勢圖 / Unable to generate price trend chart</p>"
 
-# ------------------ Flask routes ------------------
 @app.route("/", methods=["GET", "POST"])
 def index():
     result = {}
@@ -903,21 +825,18 @@ def index():
 
         try:
             session["request_count"] = request_count + 1
-            # Determine if symbol is Taiwan stock (4-digit numeric)
             is_taiwan = len(symbol) == 4 and symbol.isdigit()
             currency = "TWD" if is_taiwan else "USD"
 
-            # Fetch quote
             quote = get_quote(symbol, is_taiwan)
             if not quote or all(v == 'N/A' for v in quote.values()):
-                result["error"] = f"無法取得 {symbol} 的即時報價資料 / Unable to fetch quote data for {symbol}"
+                result["error"] = f"無法取得 {symbol} 的即時報價資料，可能是API失敗或股票代號無效 / Unable to fetch quote data for {symbol}, possibly due to API failure or invalid symbol"
                 logger.error(f"No valid quote data for {symbol}")
                 return render_template("index.html", result=result, symbol_input=symbol,
                                        tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                        stripe_mode=STRIPE_MODE, request_count=request_count,
                                        current_tier_name=current_tier_name, current_limit=current_limit)
 
-            # Fetch other data
             metrics = filter_metrics(get_metrics(symbol, is_taiwan))
             news = get_recent_news(symbol, is_taiwan)
             profile = get_company_profile(symbol, is_taiwan)
@@ -927,7 +846,6 @@ def index():
             quote['volume'] = technical.get('volume', quote.get('volume', 'N/A'))
             plot_html = get_plot_html(df, symbol, currency)
 
-            # Best Four Point analysis for Taiwan stocks
             bfp_signal = "無明確信號 / No clear signal"
             if is_taiwan:
                 try:
@@ -943,7 +861,6 @@ def index():
                     logger.error(f"Error in BestFourPoint analysis for {symbol}: {e}")
                     bfp_signal = "無法計算最佳四點信號 / Unable to calculate Best Four Point signal"
 
-            # Prepare prompt for GPT analysis
             technical_str = ", ".join(f"{k.upper()}: {v}" for k, v in technical.items() if v != 'N/A')
             prompt = (
                 f"請根據以下資訊產出中英文雙語股票分析: "
@@ -989,6 +906,7 @@ def index():
             result = {
                 "symbol": symbol,
                 "quote": {k: v for k, v in quote.items() if v != 'N/A'},
+                "profile": profile,
                 "industry_en": industry_en,
                 "industry_zh": industry_zh,
                 "metrics": metrics,
@@ -1001,7 +919,7 @@ def index():
                 "bfp_signal": bfp_signal
             }
         except Exception as e:
-            result = {"error": f"無法取得 {symbol} 的股票資料 / Unable to fetch data for {symbol}: {str(e)}"}
+            result = {"error": f"無法取得 {symbol} 的股票資料，可能是API連線問題或資料解析錯誤 / Unable to fetch data for {symbol}: {str(e)}"}
             logger.error(f"Processing error for symbol {symbol}: {e}")
 
     return render_template(
@@ -1018,7 +936,6 @@ def index():
         current_limit=current_limit
     )
 
-# ------------------ Stripe & Subscription Routes ------------------
 @app.route("/create-checkout-session", methods=["POST"])
 def create_checkout_session():
     tier_name = request.form.get("tier")
@@ -1026,20 +943,17 @@ def create_checkout_session():
     if not tier:
         logger.error(f"Invalid tier requested: {tier_name}")
         return jsonify({"error": "Invalid tier"}), 400
-
     if tier["name"] == "Free":
         session["subscribed"] = False
         session["paid_tier"] = 0
         session["request_count"] = 0
         flash("✅ Switched to Free tier.", "success")
         return jsonify({"url": url_for("index", _external=True)})
-
     price_id = STRIPE_PRICE_IDS.get(tier_name)
     if not price_id or not validate_price_id(price_id, tier_name):
         logger.error(f"No valid Price ID configured for {tier_name}")
         flash(f"⚠️ Subscription for {tier_name} is currently unavailable.", "warning")
         return jsonify({"error": f"Subscription for {tier_name} is currently unavailable"}), 400
-
     try:
         logger.info(f"Creating Stripe checkout session for {tier_name} with Price ID: {price_id}")
         session_stripe = stripe.checkout.Session.create(
@@ -1079,6 +993,5 @@ def reset():
         logger.warning("Failed reset attempt with incorrect password")
     return redirect(url_for("index"))
 
-# ------------------ Run App ------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=True)
