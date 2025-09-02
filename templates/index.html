@@ -76,6 +76,12 @@
                     </p>
                 </div>
                 <div>
+                    <h4 class="text-base font-medium text-gray-800">最佳四點信號 | Best Four Point Signal</h4>
+                    <p class="text-sm text-gray-600">
+                        {{ result.bfp_signal | default('無明確信號 | No clear signal') }}
+                    </p>
+                </div>
+                <div>
                     <h4 class="text-base font-medium text-gray-800">技術指標 | Technical Indicators</h4>
                     <p class="text-sm text-gray-600">
                         <span class="font-semibold">50日移動平均線 | 50-Day MA:</span> {{ result.technical.ma50 | default('N/A') }} TWD<br>
