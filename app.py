@@ -12,6 +12,7 @@ import pandas as pd
 import json, os
 from twstock import Stock as TwStock, realtime as twrealtime, codes as twcodes
 from twstock import BestFourPoint as TwBestFourPoint
+
 # ------------------ Load environment ------------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -42,13 +43,16 @@ else:
 if not STRIPE_SECRET_KEY or not STRIPE_PUBLISHABLE_KEY:
     raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in .env")
 stripe.api_key = STRIPE_SECRET_KEY
+
 # ------------------ Logger setup ------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 # ------------------ Initialize Flask & OpenAI ------------------
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 openai.api_key = OPENAI_API_KEY
+
 # ------------------ Stock app config ------------------
 industry_mapping = {
     "Technology": "科技業",
@@ -83,6 +87,7 @@ QUOTE_FIELDS = {
     "daily_change": ("漲跌幅(%)", "Change Percent"),
     "volume": ("交易量", "Volume")
 }
+
 # ------------------ Stripe pricing tiers ------------------
 PRICING_TIERS = [
     {"name": "Free", "limit": 50, "price": 0},
@@ -91,13 +96,16 @@ PRICING_TIERS = [
     {"name": "Tier 3", "limit": 400, "price": 29.99},
     {"name": "Tier 4", "limit": 800, "price": 39.99},
 ]
+
 # ------------------ Helper functions ------------------
 def validate_price_id(price_id, tier_name):
     return bool(price_id)
+
 def get_quote(symbol):
     try:
         data = twrealtime.get(symbol)
         if not data.get('success'):
+            logger.warning(f"No real-time data for symbol {symbol}")
             return {}
         rt = data['realtime']
         current_price = rt.get('latest_trade_price', 'N/A')
@@ -126,12 +134,16 @@ def get_quote(symbol):
     except Exception as e:
         logger.error(f"Error fetching quote for {symbol}: {e}")
         return {}
+
 def get_historical_data(symbol):
     try:
         stock = TwStock(symbol)
         current_year = datetime.datetime.now().year
         stock.fetch_from(current_year - 1, 1)  # Fetch data from January of last year to now
         df = pd.DataFrame(stock.data)
+        if df.empty:
+            logger.warning(f"No historical data for symbol {symbol}")
+            return pd.DataFrame(), {}
         df = df.rename(columns={'date': 'Date', 'capacity': 'Volume', 'turnover': 'Turnover', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'change': 'Change', 'transaction': 'Transaction'})
         df.set_index('Date', inplace=True)
         technical = {}
@@ -158,8 +170,12 @@ def get_historical_data(symbol):
     except Exception as e:
         logger.error(f"Error fetching historical data for {symbol}: {e}")
         return pd.DataFrame(), {}
+
 def get_company_profile(symbol):
     try:
+        if symbol not in twcodes:
+            logger.warning(f"Symbol {symbol} not found in twcodes")
+            return {'name': 'N/A', 'group': '未知'}
         code_info = twcodes[symbol]
         return {
             'name': code_info.name,
@@ -167,7 +183,8 @@ def get_company_profile(symbol):
         }
     except Exception as e:
         logger.error(f"Error fetching company profile for {symbol}: {e}")
-        return {}
+        return {'name': 'N/A', 'group': '未知'}
+
 def calculate_rsi(series, period=14):
     delta = series.diff(1)
     gain = delta.where(delta > 0, 0)
@@ -177,6 +194,7 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]
+
 def get_plot_html(df, symbol):
     if df.empty or 'Close' not in df.columns:
         return "<p class='text-danger'>📊 無法取得股價趨勢圖</p>"
@@ -193,6 +211,7 @@ def get_plot_html(df, symbol):
         height=400
     )
     return fig.to_html(full_html=False, include_plotlyjs='cdn', default_height="400px", default_width="100%")
+
 # ------------------ Flask routes ------------------
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -220,8 +239,8 @@ def index():
         try:
             session["request_count"] = request_count + 1
             quote = get_quote(symbol)
-            metrics = {} # Skip, or use custom calculation if needed
-            news = [] # Skip news
+            metrics = {}  # Skip, or use custom calculation if needed
+            news = []  # Skip news
             profile = get_company_profile(symbol)
             industry_zh = profile.get('group', '未知')
             industry_en = next((en for en, zh in industry_mapping.items() if zh == industry_zh), "Unknown")
@@ -259,10 +278,14 @@ def index():
                 "news": news,
                 "gpt_analysis": gpt_analysis,
                 "plot_html": plot_html,
-                "technical": technical
+                "technical": technical,
+                "profile": profile  # Add profile to result
             }
         except Exception as e:
-            result = {"error": f"資料讀取錯誤: {e}"}
+            result = {
+                "error": f"資料讀取錯誤: {e}",
+                "profile": {'name': 'N/A', 'group': '未知'}  # Provide default profile
+            }
             logger.error(f"Processing error for symbol {symbol}: {e}")
     return render_template("index.html",
                            result=result,
@@ -275,6 +298,7 @@ def index():
                            request_count=request_count,
                            current_tier_name=current_tier_name,
                            current_limit=current_limit)
+
 # ------------------ Stripe & Subscription Routes ------------------
 @app.route("/create-checkout-session", methods=["POST"])
 def create_checkout_session():
@@ -307,6 +331,7 @@ def create_checkout_session():
     except Exception as e:
         logger.error(f"Unexpected Stripe error: {e}")
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+
 @app.route("/payment-success/<tier_name>")
 def payment_success(tier_name):
     tier_index = next((i for i, t in enumerate(PRICING_TIERS) if t["name"] == tier_name), None)
@@ -317,6 +342,7 @@ def payment_success(tier_name):
         flash(f"✅ Subscription successful for {tier_name} plan.", "success")
         logger.info(f"Subscription successful for {tier_name} (tier index: {tier_index})")
     return redirect(url_for("index"))
+
 @app.route("/reset", methods=["POST"])
 def reset():
     password = request.form.get("password")
@@ -330,6 +356,7 @@ def reset():
         flash("❌ Incorrect password.", "danger")
         logger.warning("Failed reset attempt with incorrect password")
     return redirect(url_for("index"))
+
 # ------------------ Run App ------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=True)
