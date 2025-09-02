@@ -1,18 +1,29 @@
-# Use Python 3.10 base image
-FROM python:3.10
-
-# Set working directory
+FROM python:3.10-slim
 WORKDIR /app
 
-# Copy requirements.txt and install dependencies
+# Copy requirements file
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# Install system dependencies and Python packages
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
-
-# Expose port 8080
+COPY requirements.txt .
+RUN pip install --upgrade pip
+RUN pip install --no-cache-dir -r requirements.txt
+# Expose the port (Railway assigns dynamically, default to 7860)
 EXPOSE 8080
+ENV PORT=8080
 
-# Run Gunicorn
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:8080", "--log-level=info", "app:app"]
+# Set environment variables for Flask and logging
+ENV FLASK_APP=app.py
+ENV FLASK_ENV=production
+ENV PYTHONUNBUFFERED=1
+
+COPY templates /app/templates
+
+CMD ["python", "app.py"]

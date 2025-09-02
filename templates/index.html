@@ -1,13 +1,12 @@
 <!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>📊 股票分析平台 | Stock Analysis Platform</title>
-    <!-- Added SRI for security -->
-    <script src="https://js.stripe.com/v3/" integrity="sha256-/V5G2dXNhv1zFieT5fc2n+3DiKNN1K1s2K80VrH5+OU=" crossorigin="anonymous"></script>
+    <script src="https://js.stripe.com/v3/"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" integrity="sha256-yv/TTcZ6I41FzQ+21cW3m4d91mUmCRbE6yLkbZ9G048=" rel="stylesheet" crossorigin="anonymous">
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
 </head>
 <body class="bg-gradient-to-r from-teal-500 to-pink-400 font-inter text-gray-900 antialiased min-h-screen flex flex-col">
     <header class="bg-indigo-600 shadow-sm">
@@ -20,209 +19,219 @@
     </header>
 
     <main class="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <!-- Flash Messages -->
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                <div class="mb-6">
-                    {% for category, message in messages %}
-                        <div class="p-4 mb-2 rounded {% if category == 'success' %}bg-green-100 text-green-800{% elif category == 'danger' %}bg-red-100 text-red-800{% else %}bg-yellow-100 text-yellow-800{% endif %}" role="alert" aria-live="assertive">
-                            {{ message }}
-                        </div>
-                    {% endfor %}
-                </div>
-            {% endif %}
-        {% endwith %}
-
-        <!-- Subscription Tiers -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
-            <h2 class="text-lg font-semibold text-gray-700 mb-4">選擇您的方案 | Choose Your Plan</h2>
+            <h2 class="text-lg font-semibold text-gray-700 mb-4">選擇您的方案</h2>
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                 {% for tier in tiers %}
-                    <div>
-                        {% if current_tier_name == tier.name %}
-                            <button type="button" disabled 
-                                class="w-full bg-gray-200 text-gray-500 px-4 py-2 rounded-md cursor-not-allowed text-center border border-gray-300 shadow-sm" 
-                                aria-disabled="true">
-                                {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests) (已選擇 | Selected)
-                            </button>
-                        {% else %}
-                            <!-- Added CSRF token -->
-                            <form class="tierForm" method="POST" action="/create-checkout-session">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <input type="hidden" name="tier" value="{{ tier.name }}">
-                                <button type="submit" 
-                                    class="w-full bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 transition duration-200 text-center focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                                    aria-label="Select {{ tier.name }} tier">
-                                    {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests)
-                                </button>
-                            </form>
-                        {% endif %}
-                    </div>
+                <div class="tier-btn">
+                    {% if current_tier_name == tier.name %}
+                    <button type="button" disabled 
+                            class="w-full bg-gray-300 text-gray-600 px-4 py-2 rounded-md cursor-not-allowed text-center">
+                        {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests) (已選擇)
+                    </button>
+                    {% else %}
+                    <form class="tierForm" method="POST" action="/create-checkout-session">
+                        <input type="hidden" name="tier" value="{{ tier.name }}">
+                        <button type="submit" 
+                                class="w-full bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 transition duration-200 text-center">
+                            {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests)
+                        </button>
+                    </form>
+                    {% endif %}
+                </div>
                 {% endfor %}
             </div>
         </section>
 
-        <!-- Stock Analysis Input -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <div class="flex items-center justify-between mb-4">
-                <h2 class="text-lg font-semibold text-gray-700">股票分析 | Stock Analysis</h2>
+                <h2 class="text-lg font-semibold text-gray-700">股票分析</h2>
                 <span class="text-sm text-gray-600">
                     當前方案: {{ current_tier_name | default('Free') }} | 請求次數: {{ request_count | default(0) }} / {{ current_limit | default(50) }}
                 </span>
             </div>
             <form id="stockForm" method="POST" action="/" class="flex flex-col sm:flex-row gap-4 mb-4">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"> <!-- Added CSRF token -->
-                <label for="symbolInput" class="sr-only">股票代號 | Stock Symbol</label> <!-- Added for accessibility -->
                 <input type="text" id="symbolInput" name="symbol" 
-                    placeholder="輸入股票代號 (如 2330)" 
-                    required pattern="\d{4}" title="股票代號必須為4位數字 | Stock symbol must be a 4-digit number"
-                    value="{{ symbol_input | default('') }}"
-                    class="flex-grow px-4 py-2 border border-gray-200 rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                    aria-required="true">
+                       placeholder="輸入股票代號 (如 AMD, AAPL, 2330.TW)" 
+                       required value="{{ symbol_input | default('') }}"
+                       class="flex-grow px-4 py-2 border border-gray-200 rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
                 <button type="submit" 
-                    class="bg-indigo-600 text-white px-6 py-2 rounded-md hover:bg-indigo-700 transition duration-200 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    aria-label="Analyze stock">
-                    分析 | Analyze
+                        class="bg-indigo-600 text-white px-6 py-2 rounded-md hover:bg-indigo-700 transition duration-200">
+                    分析 Analyze
                 </button>
             </form>
-            <h3 class="text-lg font-medium text-gray-700">🏭 產業分類 | Industry: {{ result.industry_en | default('Unknown') }}</h3>
+            <h3 class="text-lg font-medium text-gray-700">🏭 產業分類: {{ result.industry_en | default('Unknown') }}</h3>
         </section>
 
-        <!-- Error Message -->
         {% if result.error %}
-            <section class="bg-red-50 border-l-4 border-red-500 p-4 rounded-md mb-6" role="alert" aria-live="assertive">
-                <p class="text-red-700 font-medium">❌ {{ result.error }}</p>
-            </section>
+        <section class="bg-red-50 border-l-4 border-red-500 p-4 rounded-md mb-6">
+            <p class="text-red-700 font-medium">❌ {{ result.error }}</p>
+        </section>
         {% endif %}
 
-        <!-- Stock Data and Analysis -->
         {% if result.symbol %}
-            <section class="bg-white rounded-lg shadow-md p-6 mb-6">
-                <h3 class="text-lg font-semibold text-gray-700 mb-4">🤖 AI 技術分析與投資建議 | AI Technical Analysis & Recommendations</h3>
-                <div class="border-l-4 border-teal-500 p-4 bg-gray-50 rounded-md space-y-6">
-                    <div>
-                        <h4 class="text-base font-medium text-gray-800">即時市場概覽 | Real-Time Market Overview</h4>
-                        <p class="text-sm text-gray-600">
-                            <span class="font-semibold">股票名稱 | Stock Name:</span> {{ result.stock_name | default('Unknown') }}<br>
-                            <span class="font-semibold">股票代號 | Stock Symbol:</span> {{ result.symbol }} ({{ result.market | default('上市') }})<br>
-                            <span class="font-semibold">目前價格 | Current Price:</span> {{ result.quote.current_price | default('N/A') }}<br>
-                            <span class="font-semibold">當日變化 | Daily Change:</span> 
-                            {% if result.quote.daily_change is defined and result.quote.daily_change is not none %}
-                                {% if result.quote.daily_change | float > 0 %}
-                                    <span class="text-green-600">+{{ result.quote.daily_change | round(2) }}%</span>
-                                {% else %}
-                                    <span class="text-red-600">{{ result.quote.daily_change | round(2) }}%</span>
-                                {% endif %}
+        <section class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h3 class="text-lg font-semibold text-gray-700 mb-4">🤖 AI 技術分析與投資建議</h3>
+            <div class="border-l-4 border-teal-500 p-4 bg-gray-50 rounded-md space-y-6">
+                <div>
+                    <h4 class="text-base font-medium text-gray-800">即時市場概覽 | Real-Time Market Overview</h4>
+                    <p class="text-sm text-gray-600">
+                        <span class="font-semibold">股票代號 | Stock Symbol:</span> {{ result.symbol }}<br>
+                        <span class="font-semibold">目前價格 | Current Price:</span> {{ result.quote.current_price | default('N/A') }}<br>
+                        <span class="font-semibold">當日變化 | Daily Change:</span> 
+                        {% if result.quote.daily_change is defined and result.quote.daily_change is not none %}
+                            {% if result.quote.daily_change > 0 %}
+                            <span class="text-green-600">+{{ result.quote.daily_change | round(2) }}%</span>
                             {% else %}
-                                N/A
-                            {% endif %}<br>
-                            <span class="font-semibold">交易量 | Volume:</span> {{ result.quote.volume | default('N/A') }}
-                        </p>
-                    </div>
-
-                    <div>
-                        <h4 class="text-base font-medium text-gray-800">技術指標 | Technical Indicators</h4>
-                        <p class="text-sm text-gray-600">
-                            <span class="font-semibold">50日移動平均線 | 50-Day MA:</span> {{ result.technical.ma50 | default('N/A') }}<br>
-                            <span class="font-semibold">支撐位 | Support Level:</span> {{ result.technical.support | default('N/A') }}<br>
-                            <span class="font-semibold">阻力位 | Resistance Level:</span> {{ result.technical.resistance | default('N/A') }}
-                        </p>
-                    </div>
-
-                    <div>
-                        <h4 class="text-base font-medium text-gray-800">投資建議 | Investment Recommendation</h4>
-                        <p class="text-sm text-gray-600">
-                            {% if result.gpt_analysis and result.gpt_analysis.recommendation is defined and result.gpt_analysis.recommendation is not none %}
-                                {% if result.gpt_analysis.recommendation == 'buy' %}
-                                    <span class="text-green-600 font-semibold">買入 | Buy:</span> {{ result.gpt_analysis.rationale | default('基於技術指標和市場趨勢，建議買入。 | Based on technical indicators and market trends, a buy is recommended.') | safe }}
-                                {% elif result.gpt_analysis.recommendation == 'sell' %}
-                                    <span class="text-red-600 font-semibold">賣出 | Sell:</span> {{ result.gpt_analysis.rationale | default('基於財務挑戰和高估值，建議賣出。 | Based on financial challenges and high valuation, a sell is recommended.') | safe }}
-                                {% elif result.gpt_analysis.recommendation == 'hold' %}
-                                    <span class="text-yellow-600 font-semibold">持有 | Hold:</span> {{ result.gpt_analysis.rationale | default('當前市場條件不明朗，建議持有觀望。 | Current market conditions are unclear, a hold is recommended.') | safe }}
-                                {% else %}
-                                    <span class="text-gray-600">無明確建議 | No Clear Recommendation:</span> {{ result.gpt_analysis.rationale | default('無法取得 AI 回應 | Unable to obtain AI response') | safe }}
-                                {% endif %}
-                            {% else %}
-                                <span class="text-gray-600">無明確建議 | No Clear Recommendation:</span> 無法取得 AI 回應 | Unable to obtain AI response
+                            <span class="text-red-600">{{ result.quote.daily_change | round(2) }}%</span>
                             {% endif %}
-                        </p>
-                        <p class="text-sm text-gray-600 mt-2">
-                            <span class="font-semibold">風險評估 | Risk Assessment:</span> {{ result.gpt_analysis.risk | default('中等風險，建議密切監控市場動態。 | Moderate risk, monitor market dynamics closely.') | safe }}
-                        </p>
-                    </div>
-
-                    <div>
-                        <h4 class="text-base font-medium text-gray-800">總結 | Summary</h4>
-                        <p class="text-sm text-gray-600">
-                            {{ result.gpt_analysis.summary | default('請審慎評估技術和財務指標後進行投資決策。 | Please carefully evaluate technical and financial metrics before making investment decisions.') | safe }}
-                        </p>
-                    </div>
-                    <p class="text-xs text-gray-500 mt-4">*以上分析僅供參考，投資有風險 | The above analysis is for reference only; investing involves risks.*</p>
-                    {% if result.plot_html %}
-                        <div class="mt-4">
-                            <h4 class="text-base font-medium text-gray-800">價格走勢圖 | Price Trend Chart</h4>
-                            {{ result.plot_html | safe }}
-                        </div>
-                    {% endif %}
+                        {% else %}
+                            N/A
+                        {% endif %}<br>
+                        <span class="font-semibold">交易量 | Volume:</span> {{ result.quote.volume | default('N/A') }}
+                    </p>
                 </div>
-            </section>
 
-            <section class="bg-white rounded-lg shadow-md p-6 mb-6">
-                <h3 class="text-lg font-semibold text-gray-700 mb-4">💰 即時報價 | Real-Time Quote</h3>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-sm border-collapse">
-                        <thead>
-                            <tr class="bg-gray-100">
-                                {% for key, label in QUOTE_FIELDS.items() %}
-                                    <th class="border border-gray-200 px-4 py-2 text-left">{{ label[0] }}<br>{{ label[1] }}</th>
-                                {% endfor %}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                {% for key, label in QUOTE_FIELDS.items() %}
-                                    <td class="border border-gray-200 px-4 py-2">{{ result.quote[key] | default('N/A') }}</td>
-                                {% endfor %}
-                            </tr>
-                        </tbody>
-                    </table>
+                <div>
+                    <h4 class="text-base font-medium text-gray-800">技術指標 | Technical Indicators</h4>
+                    <p class="text-sm text-gray-600">
+                        <span class="font-semibold">50日移動平均線 | 50-Day MA:</span> {{ result.technical.ma50 | default('N/A') }}<br>
+                        <span class="font-semibold">相對強弱指數 (RSI) | RSI:</span> {{ result.technical.rsi | default('N/A') }} 
+                        {% if result.technical.rsi is defined and result.technical.rsi is not none %}
+                            {% if result.technical.rsi > 70 %}
+                            <span class="text-red-600">(超買 | Overbought)</span>
+                            {% elif result.technical.rsi < 30 %}
+                            <span class="text-green-600">(超賣 | Oversold)</span>
+                            {% else %}
+                            <span class="text-gray-600">(中性 | Neutral)</span>
+                            {% endif %}
+                        {% endif %}<br>
+                        <span class="font-semibold">MACD:</span> {{ result.technical.macd | default('N/A') }} 
+                        {% if result.technical.macd is defined and result.technical.macd is not none %}
+                            {% if result.technical.macd > 0 %}
+                            <span class="text-green-600">(看漲 | Bullish)</span>
+                            {% else %}
+                            <span class="text-red-600">(看跌 | Bearish)</span>
+                            {% endif %}
+                        {% endif %}<br>
+                        <span class="font-semibold">支撐位 | Support Level:</span> {{ result.technical.support | default('N/A') }}<br>
+                        <span class="font-semibold">阻力位 | Resistance Level:</span> {{ result.technical.resistance | default('N/A') }}
+                    </p>
                 </div>
-            </section>
 
-            {% if result.news is defined and result.news | length > 0 %}
-                <section class="bg-white rounded-lg shadow-md p-6 mb-6">
-                    <h3 class="text-lg font-semibold text-gray-700 mb-4">📰 近10日新聞 | Recent News</h3>
-                    <div class="space-y-4">
-                        {% for item in result.news %}
-                            <div class="border-l-4 border-indigo-500 bg-gray-50 p-4 rounded-md">
-                                <p class="text-sm text-gray-600">🗓️ {{ item.datetime | default('N/A') }}</p>
-                                <p class="text-base">
-                                    <a href="{{ item.url | default('#') }}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline font-medium">
-                                        {{ item.headline | default('無標題 | No Title') }}
-                                    </a>
-                                </p>
-                            </div>
-                        {% endfor %}
-                    </div>
-                </section>
-            {% endif %}
+                <div>
+                    <h4 class="text-base font-medium text-gray-800">財務健康 | Financial Health</h4>
+                    <p class="text-sm text-gray-600">
+                        <span class="font-semibold">市盈率 (PE TTM) | PE Ratio (TTM):</span> {{ result.metrics.pe_ratio | default('N/A') }}<br>
+                        <span class="font-semibold">市淨率 (PB) | PB Ratio:</span> {{ result.metrics.pb_ratio | default('N/A') }}<br>
+                        <span class="font-semibold">收入增長 (YoY) | Revenue Growth (YoY):</span> {{ result.metrics.revenue_growth | default('N/A') }}<br>
+                        <span class="font-semibold">每股盈利增長 (YoY) | EPS Growth (YoY):</span> {{ result.metrics.eps_growth | default('N/A') }}
+                    </p>
+                </div>
+
+                <div>
+                    <h4 class="text-base font-medium text-gray-800">投資建議 | Investment Recommendation</h4>
+                    <p class="text-sm text-gray-600">
+                        {% if result.gpt_analysis.recommendation is defined and result.gpt_analysis.recommendation is not none %}
+                            {% if result.gpt_analysis.recommendation == 'buy' %}
+                            <span class="text-green-600 font-semibold">買入 | Buy:</span> {{ result.gpt_analysis.rationale | default('基於技術指標和市場趨勢，建議買入。 | Based on technical indicators and market trends, a buy is recommended.') }}
+                            {% elif result.gpt_analysis.recommendation == 'sell' %}
+                            <span class="text-red-600 font-semibold">賣出 | Sell:</span> {{ result.gpt_analysis.rationale | default('基於財務挑戰和高估值，建議賣出。 | Based on financial challenges and high valuation, a sell is recommended.') }}
+                            {% elif result.gpt_analysis.recommendation == 'hold' %}
+                            <span class="text-yellow-600 font-semibold">持有 | Hold:</span> {{ result.gpt_analysis.rationale | default('當前市場條件不明朗，建議持有觀望。 | Current market conditions are unclear, a hold is recommended.') }}
+                            {% endif %}
+                        {% else %}
+                            <span class="text-gray-600">無明確建議 | No Clear Recommendation:</span> {{ result.gpt_analysis | default('無法取得 AI 回應 | Unable to obtain AI response') | safe }}
+                        {% endif %}
+                    </p>
+                    <p class="text-sm text-gray-600 mt-2">
+                        <span class="font-semibold">風險評估 | Risk Assessment:</span> {{ result.gpt_analysis.risk | default('中等風險，建議密切監控市場動態。 | Moderate risk, monitor market dynamics closely.') }}
+                    </p>
+                </div>
+
+                <div>
+                    <h4 class="text-base font-medium text-gray-800">總結 | Summary</h4>
+                    <p class="text-sm text-gray-600">
+                        {{ result.gpt_analysis.summary | default('請審慎評估技術和財務指標後進行投資決策。 | Please carefully evaluate technical and financial metrics before making investment decisions.') | safe }}
+                    </p>
+                </div>
+                <p class="text-xs text-gray-500 mt-4">*以上分析僅供參考，投資有風險 | The above analysis is for reference only; investing involves risks.*</p>
+            </div>
+        </section>
+
+        <section class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h3 class="text-lg font-semibold text-gray-700 mb-4">💰 即時報價</h3>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="bg-gray-100">
+                            {% for key, label in QUOTE_FIELDS.items() %}
+                            <th class="border border-gray-200 px-4 py-2">{{ label[0] }}<br>{{ label[1] }}</th>
+                            {% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            {% for key, label in QUOTE_FIELDS.items() %}
+                            <td class="border border-gray-200 px-4 py-2">{{ result.quote[key] | default('N/A') }}</td>
+                            {% endfor %}
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h3 class="text-lg font-semibold text-gray-700 mb-4">📊 重要財務指標</h3>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="bg-gray-100">
+                            {% for key, label in METRIC_NAMES_ZH_EN.items() %}
+                            <th class="border border-gray-200 px-4 py-2">{{ label }}</th>
+                            {% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            {% for key in METRIC_NAMES_ZH_EN.keys() %}
+                            <td class="border border-gray-200 px-4 py-2">{{ result.metrics.get(key, 'N/A') }}</td>
+                            {% endfor %}
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        {% if result.news is defined and result.news %}
+        <section class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h3 class="text-lg font-semibold text-gray-700 mb-4">📰 近10日新聞</h3>
+            <div class="space-y-4">
+                {% for item in result.news %}
+                <div class="border-l-4 border-indigo-500 bg-gray-50 p-4 rounded-md">
+                    <p class="text-sm text-gray-600">🗓️ {{ item.datetime | default('N/A') }}</p>
+                    <p class="text-base">
+                        <a href="{{ item.url | default('#') }}" target="_blank" class="text-indigo-600 hover:underline font-medium">
+                            {{ item.headline | default('無標題 | No Title') }}
+                        </a>
+                    </p>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+        {% endif %}
         {% endif %}
 
-        <!-- Reset Form -->
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
-            <h2 class="text-lg font-semibold text-gray-700 mb-4">重置請求計數 | Reset Request Count</h2>
+            <h2 class="text-lg font-semibold text-gray-700 mb-4">重置請求計數</h2>
             <form class="reset-form" method="POST" action="/reset" class="flex flex-col sm:flex-row gap-4">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"> <!-- Added CSRF token -->
-                <label for="resetPassword" class="sr-only">重置密碼 | Reset Password</label> <!-- Added for accessibility -->
-                <input type="password" id="resetPassword" name="password" 
-                    placeholder="輸入重置密碼 | Enter Reset Password" 
-                    required
-                    class="flex-grow px-4 py-2 border border-gray-200 rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                    aria-required="true">
+                <input type="password" name="password" 
+                       placeholder="輸入重置密碼 / Enter Reset Password" 
+                       required
+                       class="flex-grow px-4 py-2 border border-gray-200 rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
                 <button type="submit" 
-                    class="bg-indigo-600 text-white px-6 py-2 rounded-md hover:bg-indigo-700 transition duration-200 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    aria-label="Reset request count">
-                    重置計數 | Reset Count
+                        class="bg-indigo-600 text-white px-6 py-2 rounded-md hover:bg-indigo-700 transition duration-200">
+                    重置計數 Reset Count
                 </button>
             </form>
         </section>
@@ -235,79 +244,47 @@
     </footer>
 
     <script>
-        const stripe = Stripe('{{ stripe_pub_key | safe }}');
-        const stockForm = document.getElementById("stockForm");
-        stockForm.addEventListener("submit", function(e) {
-            e.preventDefault();
-            const btn = this.querySelector("button[type=submit]");
-            const input = document.getElementById("symbolInput");
-            if (!input.value.match(/^\d{4}$/)) {
-                alert("股票代號必須為4位數字 | Stock symbol must be a 4-digit number");
-                input.focus();
-                return;
-            }
-            btn.disabled = true;
-            btn.textContent = "處理中... | Processing...";
-            this.submit(); // Direct submit after validation
-        });
+    document.getElementById("stockForm").addEventListener("submit", function(e) {
+        e.preventDefault();
+        const btn = this.querySelector("button[type=submit]");
+        const input = document.getElementById("symbolInput");
+        if (!input.value.trim()) { alert("請輸入股票代號 / Please enter a stock symbol"); return; }
+        btn.disabled = true; btn.textContent = "處理中... / Processing...";
+        setTimeout(() => this.submit(), 100);
+    });
 
-        document.querySelectorAll('.tierForm').forEach(form => {
-            form.addEventListener('submit', async function(e) {
-                e.preventDefault();
-                const btn = this.querySelector('button');
-                const originalText = btn.textContent;
-                btn.disabled = true;
-                btn.textContent = "處理中... | Processing...";
-                try {
-                    const res = await fetch(this.action, {
-                        method: 'POST',
-                        body: new FormData(this),
-                        headers: { 'Accept': 'application/json' }
-                    });
-                    if (!res.ok) {
-                        throw new Error(`HTTP error: ${res.status}`);
-                    }
-                    const data = await res.json();
-                    if (data.url) {
-                        window.location.href = data.url;
-                    } else {
-                        console.error('Stripe error:', data.error);
-                        alert(data.error || "Stripe checkout error");
-                        btn.disabled = false;
-                        btn.textContent = originalText;
-                    }
-                } catch (err) {
-                    console.error('Fetch error:', err);
-                    alert("無法連接到伺服器 | Unable to connect to server");
-                    btn.disabled = false;
-                    btn.textContent = originalText;
-                }
-            });
-        });
-
-        document.querySelector('.reset-form').addEventListener('submit', async function(e) {
+    document.querySelectorAll('.tierForm').forEach(form => {
+        form.addEventListener('submit', function(e) {
             e.preventDefault();
             const btn = this.querySelector('button');
             const originalText = btn.textContent;
-            btn.disabled = true;
-            btn.textContent = "處理中... | Processing...";
-            try {
-                const res = await fetch(this.action, {
-                    method: 'POST',
-                    body: new FormData(this),
-                    headers: { 'Accept': 'text/html' }
-                });
-                if (!res.ok) {
-                    throw new Error(`HTTP error: ${res.status}`);
-                }
-                window.location.reload();
-            } catch (err) {
-                console.error('Fetch error:', err);
-                alert("重置失敗 | Reset failed");
-                btn.disabled = false;
-                btn.textContent = originalText;
-            }
+            btn.disabled = true; btn.textContent = "處理中... / Processing...";
+            fetch(this.action, { method: 'POST', body: new FormData(this) })
+            .then(res => res.json())
+            .then(data => {
+                if (data.url) { window.location.href = data.url; }
+                else { alert(data.error || "Stripe checkout error"); btn.disabled = false; btn.textContent = originalText; }
+            })
+            .catch(err => {
+                console.error(err);
+                alert("Stripe checkout failed"); btn.disabled = false; btn.textContent = originalText;
+            });
         });
+    });
+
+    document.querySelector('.reset-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        const btn = this.querySelector('button');
+        const originalText = btn.textContent;
+        btn.disabled = true; btn.textContent = "處理中... / Processing...";
+        fetch(this.action, { method: 'POST', body: new FormData(this) })
+        .then(res => res.text())
+        .then(() => { window.location.reload(); })
+        .catch(err => {
+            console.error(err);
+            alert("Reset failed"); btn.disabled = false; btn.textContent = originalText;
+        });
+    });
     </script>
 </body>
 </html>
