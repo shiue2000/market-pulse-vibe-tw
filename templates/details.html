@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>股票詳情 / Stock Details - {{ result.symbol }}</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+</head>
+<body class="container">
+    <h1 class="mt-4">股票詳情 / Stock Details - {{ result.symbol }}</h1>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    {% if result.error %}
+        <div class="alert alert-danger">{{ result.error }}</div>
+    {% else %}
+        <h3>{{ result.profile.name }}</h3>
+        <p>產業 / Industry: {{ result.profile.group }}</p>
+        <h4>即時報價 / Real-Time Quote</h4>
+        <table class="table">
+            {% for key, (zh_name, en_name) in QUOTE_FIELDS.items() %}
+                <tr>
+                    <td>{{ zh_name }} ({{ en_name }})</td>
+                    <td>{{ result.quote.get(key, 'N/A') }}</td>
+                </tr>
+            {% endfor %}
+        </table>
+        <h4>技術指標 / Technical Indicators</h4>
+        <table class="table">
+            {% for key, value in result.technical.items() %}
+                <tr>
+                    <td>{{ key.upper() }}</td>
+                    <td>{{ value }}</td>
+                </tr>
+            {% endfor %}
+        </table>
+        <h4>最佳四點信號 / Best Four Point Signal</h4>
+        <p>{{ result.bfp_signal }}</p>
+        <h4>價格趨勢 / Price Trend</h4>
+        <div>{{ result.plot_html | safe }}</div>
+        <h4>近期新聞 / Recent News</h4>
+        {% if result.news %}
+            <ul>
+                {% for article in result.news %}
+                    <li>
+                        {{ article.title }} ({{ article.source }} - {{ article.published_at }})
+                        {% if article.url and article.url != 'http://example.com' %}
+                            <a href="{{ article.url }}" target="_blank" class="btn btn-link">查看詳情</a>
+                        {% else %}
+                            <span class="text-muted">無有效連結 / No valid link</span>
+                        {% endif %}
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>無近期新聞 / No recent news available</p>
+        {% endif %}
+    {% endif %}
+    <a href="{{ url_for('index') }}" class="btn btn-primary mt-4">返回 / Back</a>
+</body>
+</html>
