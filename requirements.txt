@@ -9,4 +9,5 @@ pandas==2.2.2
 markdown2
 stripe
 python-dotenv
+ß
 
