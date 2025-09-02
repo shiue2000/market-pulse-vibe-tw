@@ -50,7 +50,7 @@
             </div>
             <form id="stockForm" method="POST" action="/" class="flex flex-col sm:flex-row gap-4 mb-4">
                 <input type="text" id="symbolInput" name="symbol"
-                       placeholder="輸入股票代號 (如 2330, AAPL) | Enter Stock Symbol (e.g., 2330, AAPL)"
+                       placeholder="輸入股票代號 (如 2330, 2382) | Enter Stock Symbol (e.g., 2330, 2382)"
                        required value="{{ symbol_input | default('') }}"
                        class="flex-grow px-4 py-2 border border-gray-200 rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
                 <button type="submit"
