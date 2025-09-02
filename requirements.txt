@@ -10,3 +10,4 @@ plotly
 lxml
 twstock
 flask
+beautifulsoup4
