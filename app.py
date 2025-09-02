@@ -12,98 +12,49 @@ import pandas as pd
 import json
 from twstock import Stock as TwStock, realtime as twrealtime, codes as twcodes
 from twstock import BestFourPoint as TwBestFourPoint
-from functools import lru_cache
-import secrets
-import re
-
-# ------------------ Logger setup ------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
+from bs4 import BeautifulSoup
 
 # ------------------ Load environment ------------------
-def load_env_variable(var_name, required=True, default=None):
-    """Load environment variable with validation."""
-    value = os.getenv(var_name, default)
-    if required and not value:
-        logger.error(f"Missing environment variable: {var_name}")
-        flash(f"⚠️ Server configuration error: {var_name} is missing.", "danger")
-        raise RuntimeError(f"❌ {var_name} not set")
-    return value
-
-OPENAI_API_KEY = load_env_variable("OPENAI_API_KEY")
-SECRET_KEY = load_env_variable("SECRET_KEY", default=secrets.token_hex(16))
-STRIPE_MODE = load_env_variable("STRIPE_MODE", default="test").lower()
-RESET_PASSWORD = load_env_variable("RESET_PASSWORD", default=secrets.token_hex(16))
-
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "327ab6e463624447901ecee80b7dcb0b")
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
 # Stripe keys
-STRIPE_TEST_SECRET_KEY = load_env_variable("STRIPE_TEST_SECRET_KEY", required=STRIPE_MODE == "test")
-STRIPE_TEST_PUBLISHABLE_KEY = load_env_variable("STRIPE_TEST_PUBLISHABLE_KEY", required=STRIPE_MODE == "test")
-STRIPE_LIVE_SECRET_KEY = load_env_variable("STRIPE_LIVE_SECRET_KEY", required=STRIPE_MODE == "live")
-STRIPE_LIVE_PUBLISHABLE_KEY = load_env_variable("STRIPE_LIVE_PUBLISHABLE_KEY", required=STRIPE_MODE == "live")
-
+STRIPE_TEST_SECRET_KEY = os.getenv("STRIPE_TEST_SECRET_KEY")
+STRIPE_TEST_PUBLISHABLE_KEY = os.getenv("STRIPE_TEST_PUBLISHABLE_KEY")
+STRIPE_LIVE_SECRET_KEY = os.getenv("STRIPE_LIVE_SECRET_KEY")
+STRIPE_LIVE_PUBLISHABLE_KEY = os.getenv("STRIPE_LIVE_PUBLISHABLE_KEY")
+STRIPE_MODE = os.getenv("STRIPE_MODE", "test").lower()
 # Stripe Price IDs
 STRIPE_PRICE_IDS = {
-    "Free": load_env_variable("STRIPE_PRICE_TIER0", required=False),
-    "Tier 1": load_env_variable("STRIPE_PRICE_TIER1", required=False),
-    "Tier 2": load_env_variable("STRIPE_PRICE_TIER2", required=False),
-    "Tier 3": load_env_variable("STRIPE_PRICE_TIER3", required=False),
-    "Tier 4": load_env_variable("STRIPE_PRICE_TIER4", required=False),
+    "Free": os.getenv("STRIPE_PRICE_TIER0"),
+    "Tier 1": os.getenv("STRIPE_PRICE_TIER1"),
+    "Tier 2": os.getenv("STRIPE_PRICE_TIER2"),
+    "Tier 3": os.getenv("STRIPE_PRICE_TIER3"),
+    "Tier 4": os.getenv("STRIPE_PRICE_TIER4"),
 }
-
+if not OPENAI_API_KEY:
+    raise RuntimeError("❌ OPENAI_API_KEY not set in environment variables")
+if not NEWSAPI_KEY:
+    logger.warning("⚠️ NEWSAPI_KEY not set; news fetching may be limited")
+# Set Stripe keys
 if STRIPE_MODE == "live":
     STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
     STRIPE_PUBLISHABLE_KEY = STRIPE_LIVE_PUBLISHABLE_KEY
 else:
     STRIPE_SECRET_KEY = STRIPE_TEST_SECRET_KEY
     STRIPE_PUBLISHABLE_KEY = STRIPE_TEST_PUBLISHABLE_KEY
-
+if not STRIPE_SECRET_KEY or not STRIPE_PUBLISHABLE_KEY:
+    raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in environment variables")
 stripe.api_key = STRIPE_SECRET_KEY
+
+# ------------------ Logger setup ------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ------------------ Initialize Flask & OpenAI ------------------
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
-app.config.update(
-    SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax',
-    PERMANENT_SESSION_LIFETIME=datetime.timedelta(minutes=30)
-)
 openai.api_key = OPENAI_API_KEY
-
-# Test API connectivity
-def test_openai_api():
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": "Test"}],
-            max_tokens=10
-        )
-        logger.info("OpenAI API test successful")
-        return True
-    except Exception as e:
-        logger.error(f"OpenAI API test failed: {e}")
-        return False
-
-def test_stripe_api():
-    try:
-        stripe.Price.list(limit=1)
-        logger.info("Stripe API test successful")
-        return True
-    except Exception as e:
-        logger.error(f"Stripe API test failed: {e}")
-        return False
-
-# Run API tests at startup
-if not test_openai_api():
-    logger.error("OpenAI API is not accessible. Check API key and permissions.")
-    flash("⚠️ Analysis service is currently unavailable.", "danger")
-if not test_stripe_api():
-    logger.error("Stripe API is not accessible. Check keys and mode.")
-    flash("⚠️ Payment system is currently unavailable.", "danger")
 
 # ------------------ Stock app config ------------------
 industry_mapping = {
@@ -151,17 +102,8 @@ PRICING_TIERS = [
 
 # ------------------ Helper functions ------------------
 def validate_price_id(price_id, tier_name):
-    """Validate Stripe price ID with API check."""
-    if not price_id:
-        return False
-    try:
-        stripe.Price.retrieve(price_id)
-        return True
-    except Exception as e:
-        logger.error(f"Invalid Price ID for {tier_name}: {e}")
-        return False
+    return bool(price_id)
 
-@lru_cache(maxsize=128)
 def get_quote(symbol):
     try:
         if symbol not in twcodes:
@@ -182,6 +124,7 @@ def get_quote(symbol):
             'daily_change': 'N/A',
             'volume': rt.get('accumulate_trade_volume', 'N/A')
         }
+        # Fetch previous close from historical data
         stock = TwStock(symbol)
         historical = stock.fetch_31()
         if historical:
@@ -195,10 +138,9 @@ def get_quote(symbol):
                     logger.warning(f"Unable to calculate daily change for {symbol}")
         return quote
     except Exception as e:
-        logger.error(f"Error fetching quote for {symbol}: {e}", exc_info=True)
+        logger.error(f"Error fetching quote for {symbol}: {e}")
         return {}
 
-@lru_cache(maxsize=128)
 def get_historical_data(symbol):
     try:
         if symbol not in twcodes:
@@ -206,16 +148,12 @@ def get_historical_data(symbol):
             return pd.DataFrame(), {}
         stock = TwStock(symbol)
         current_year = datetime.datetime.now().year
-        stock.fetch_from(current_year - 1, 1)
+        stock.fetch_from(current_year - 1, 1)  # Fetch data from January of last year to now
         df = pd.DataFrame(stock.data)
         if df.empty:
             logger.warning(f"No historical data for symbol {symbol}")
             return pd.DataFrame(), {}
-        df = df.rename(columns={
-            'date': 'Date', 'capacity': 'Volume', 'turnover': 'Turnover',
-            'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close',
-            'change': 'Change', 'transaction': 'Transaction'
-        })
+        df = df.rename(columns={'date': 'Date', 'capacity': 'Volume', 'turnover': 'Turnover', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'change': 'Change', 'transaction': 'Transaction'})
         df.set_index('Date', inplace=True)
         technical = {}
         if not df.empty:
@@ -230,19 +168,18 @@ def get_historical_data(symbol):
             resistance = df['High'].tail(tail_20).max()
             volume = df['Volume'].iloc[-1]
             technical = {
-                'ma50': round(ma50, 2) if pd.notna(ma50) else 'N/A',
-                'rsi': round(rsi, 2) if pd.notna(rsi) else 'N/A',
-                'macd': round(macd, 2) if pd.notna(macd) else 'N/A',
-                'support': round(support, 2) if pd.notna(support) else 'N/A',
-                'resistance': round(resistance, 2) if pd.notna(resistance) else 'N/A',
+                'ma50': round(ma50, 2),
+                'rsi': round(rsi, 2),
+                'macd': round(macd, 2),
+                'support': round(support, 2),
+                'resistance': round(resistance, 2),
                 'volume': volume
             }
         return df, technical
     except Exception as e:
-        logger.error(f"Error fetching historical data for {symbol}: {e}", exc_info=True)
+        logger.error(f"Error fetching historical data for {symbol}: {e}")
         return pd.DataFrame(), {}
 
-@lru_cache(maxsize=128)
 def get_company_profile(symbol):
     try:
         if symbol not in twcodes:
@@ -254,64 +191,116 @@ def get_company_profile(symbol):
             'group': code_info.group
         }
     except Exception as e:
-        logger.error(f"Error fetching company profile for {symbol}: {e}", exc_info=True)
+        logger.error(f"Error fetching company profile for {symbol}: {e}")
         return {'name': 'N/A', 'group': '未知'}
 
-@lru_cache(maxsize=128)
-def get_stock_news(symbol, company_name, limit=10):
+def get_twse_news(symbol, company_name, limit=5):
     try:
-        from_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
-        prompt = f"""
-        Fetch the top {limit} most relevant news articles about the company {company_name} (stock symbol: {symbol}) from the past 30 days.
-        Return the results in JSON format with the following structure for each article:
-        {{
-            "title": "article title in English or Chinese",
-            "url": "valid, real article URL (must not be a placeholder like example.com, example.org, or example.net)",
-            "published_at": "publication date in YYYY-MM-DD format",
-            "source": "source name"
-        }}
-        Ensure the articles are directly related to the company or stock, written in English or Chinese, and have valid, accessible URLs from reputable sources (e.g., TechNews, Bloomberg, Reuters). Exclude any articles with placeholder or invalid URLs.
-        """
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a financial news assistant capable of fetching and summarizing recent news articles. Provide accurate and relevant news data in JSON format with valid URLs from real sources."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=2000,
-            temperature=0.5,
-            response_format={"type": "json_object"}
-        )
-        news_data = json.loads(response['choices'][0]['message']['content'])
-        news = news_data.get('articles', [])[:limit]
-        # Filter out invalid URLs
-        valid_news = [
-            article for article in news
-            if article.get('url') and not any(
-                invalid in article['url'].lower() for invalid in ['example.com', 'example.org', 'example.net']
-            ) and article['url'].startswith(('http://', 'https://'))
-        ]
-        if len(valid_news) < len(news):
-            logger.warning(f"Filtered out {len(news) - len(valid_news)} articles with invalid URLs for {symbol}")
-        logger.info(f"Fetched {len(valid_news)} news articles for {symbol}: {[article['title'] for article in valid_news]}")
-        return valid_news
+        url = "https://www.twse.com.tw/en/announcement/list"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        news = []
+        # Parse TWSE news (adjust selectors based on actual TWSE HTML structure)
+        for item in soup.select('table tr')[:limit * 2]:  # Fetch more to filter relevant
+            title_elem = item.select_one('td:nth-child(2) a')
+            date_elem = item.select_one('td:nth-child(1)')
+            if title_elem and date_elem:
+                title = title_elem.text.strip()
+                # Filter for company_name or symbol
+                if company_name in title or symbol in title:
+                    news.append({
+                        'title': title,
+                        'url': 'https://www.twse.com.tw' + title_elem.get('href', '#'),
+                        'published_at': date_elem.text.strip(),
+                        'source': 'Taiwan Stock Exchange'
+                    })
+        logger.info(f"Fetched {len(news)} TWSE news articles for {symbol}: {[article['title'] for article in news]}")
+        return news[:limit]
     except Exception as e:
-        logger.error(f"Error fetching news for {symbol}: {e}", exc_info=True)
+        logger.error(f"Error fetching TWSE news for {symbol}: {e}")
         return []
 
+def get_stock_news(symbol, company_name, limit=5):
+    news = []
+    if NEWSAPI_KEY:
+        try:
+            # Primary query with exact company name and symbol
+            query = f"\"{company_name}\" OR \"{symbol}\""
+            from_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+            params = {
+                'q': query,
+                'from': from_date,
+                'sortBy': 'relevancy',
+                'language': 'en',
+                'apiKey': NEWSAPI_KEY
+            }
+            logger.info(f"Sending NewsAPI query: {query} from {from_date}")
+            response = requests.get("https://newsapi.org/v2/everything", params=params)
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"NewsAPI response status: {data.get('status')} | Total results: {data.get('totalResults', 0)}")
+            if data.get('status') == 'ok':
+                articles = data.get('articles', [])[:limit]
+                news = [
+                    {
+                        'title': article.get('title', 'N/A'),
+                        'url': article.get('url', '#'),
+                        'published_at': article.get('publishedAt', 'N/A'),
+                        'source': article.get('source', {}).get('name', 'Unknown')
+                    }
+                    for article in articles
+                ]
+                logger.info(f"Fetched {len(news)} NewsAPI articles for {symbol}: {[article['title'] for article in news]}")
+            else:
+                logger.warning(f"NewsAPI error: {data.get('message', 'Unknown error')}")
+        except Exception as e:
+            logger.error(f"Error fetching NewsAPI news for {symbol}: {e}")
+    if not news:
+        logger.info(f"No NewsAPI results for {symbol}; falling back to TWSE")
+        news = get_twse_news(symbol, company_name, limit)
+    if not news:
+        logger.info(f"No TWSE results for {symbol}; trying broader NewsAPI query")
+        try:
+            params = {
+                'q': f"{symbol} stock",
+                'from': (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y-%m-%d'),
+                'sortBy': 'relevancy',
+                'language': 'en',
+                'apiKey': NEWSAPI_KEY
+            }
+            logger.info(f"Sending fallback NewsAPI query: {params['q']}")
+            response = requests.get("https://newsapi.org/v2/everything", params=params)
+            response.raise_for_status()
+            data = response.json()
+            if data.get('status') == 'ok':
+                articles = data.get('articles', [])[:limit]
+                news = [
+                    {
+                        'title': article.get('title', 'N/A'),
+                        'url': article.get('url', '#'),
+                        'published_at': article.get('publishedAt', 'N/A'),
+                        'source': article.get('source', {}).get('name', 'Unknown')
+                    }
+                    for article in articles
+                ]
+                logger.info(f"Fallback query fetched {len(news)} NewsAPI articles for {symbol}: {[article['title'] for article in news]}")
+        except Exception as e:
+            logger.error(f"Error fetching fallback NewsAPI news for {symbol}: {e}")
+    return news
+
 def calculate_rsi(series, period=14):
-    try:
-        delta = series.diff(1)
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(window=period, min_periods=1).mean()
-        avg_loss = loss.rolling(window=period, min_periods=1).mean()
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi.iloc[-1] if pd.notna(rsi.iloc[-1]) else 'N/A'
-    except Exception as e:
-        logger.error(f"Error calculating RSI: {e}")
-        return 'N/A'
+    delta = series.diff(1)
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=period, min_periods=1).mean()
+    avg_loss = loss.rolling(window=period, min_periods=1).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1]
 
 def get_plot_html(df, symbol):
     if df.empty or 'Close' not in df.columns:
@@ -323,8 +312,8 @@ def get_plot_html(df, symbol):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=dates, y=closes, mode='lines+markers', name='Close Price'))
     fig.update_layout(
-        title=f"{symbol} 最近7日收盤價",
-        xaxis_title="日期",
+        title=f"{symbol} 最近7日收盤價 / 7-Day Closing Price Trend",
+        xaxis_title="日期 / Date",
         yaxis_title="收盤價 (TWD)",
         template="plotly_white",
         height=400
@@ -345,74 +334,66 @@ def index():
         if request_count >= current_limit:
             result["error"] = f"已達 {current_tier_name} 等級請求上限，請升級方案"
             return render_template("index.html", result=result, symbol_input=symbol,
-                                 tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
-                                 stripe_mode=STRIPE_MODE, request_count=request_count,
-                                 current_tier_name=current_tier_name, current_limit=current_limit)
+                                   tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
+                                   stripe_mode=STRIPE_MODE, request_count=request_count,
+                                   current_tier_name=current_tier_name, current_limit=current_limit)
         symbol = request.form.get("symbol", "").strip().upper()
-        if not symbol or not re.match(r"^[A-Z0-9]{1,10}$", symbol):
-            result["error"] = "無效的股票代號"
+        if not symbol:
+            result["error"] = "請輸入股票代號 / Please enter a stock symbol"
             return render_template("index.html", result=result, symbol_input=symbol,
-                                 tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
-                                 stripe_mode=STRIPE_MODE, request_count=request_count,
-                                 current_tier_name=current_tier_name, current_limit=current_limit)
+                                   tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
+                                   stripe_mode=STRIPE_MODE, request_count=request_count,
+                                   current_tier_name=current_tier_name, current_limit=current_limit)
         if symbol not in twcodes:
             result = {
-                "error": f"無效的股票代號: {symbol}",
+                "error": f"無效的股票代號: {symbol} / Invalid stock symbol: {symbol}",
                 "profile": {'name': 'N/A', 'group': '未知'},
                 "news": []
             }
             return render_template("index.html", result=result, symbol_input=symbol,
-                                 tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
-                                 stripe_mode=STRIPE_MODE, request_count=request_count,
-                                 current_tier_name=current_tier_name, current_limit=current_limit)
+                                   tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
+                                   stripe_mode=STRIPE_MODE, request_count=request_count,
+                                   current_tier_name=current_tier_name, current_limit=current_limit)
         try:
             session["request_count"] = request_count + 1
             quote = get_quote(symbol)
+            metrics = {}  # Skip, or use custom calculation if needed
             profile = get_company_profile(symbol)
             company_name = profile.get('name', 'Unknown')
-            news = get_stock_news(symbol, company_name)
+            news = get_stock_news(symbol, company_name)  # Fetch news
             industry_zh = profile.get('group', '未知')
             industry_en = next((en for en, zh in industry_mapping.items() if zh == industry_zh), "Unknown")
             df, technical = get_historical_data(symbol)
             plot_html = get_plot_html(df, symbol)
-            bfp_signal = "無明確信號"
+            bfp_signal = "無明確信號 / No clear signal"
             try:
                 stock = TwStock(symbol)
-                stock.fetch_31()
+                stock.fetch_31()  # Fetch recent data for BestFourPoint analysis
                 bfp = TwBestFourPoint(stock)
                 best = bfp.best_four_point()
                 if best:
                     bfp_signal = f"買入信號: {best[1]}" if best[0] else f"賣出信號: {best[1]}"
             except Exception as e:
-                logger.error(f"BestFourPoint analysis failed for {symbol}: {e}", exc_info=True)
+                logger.error(f"Error in BestFourPoint analysis for {symbol}: {e}")
             technical_str = ", ".join(f"{k.upper()}: {v}" for k, v in technical.items() if v != 'N/A')
-            prompt = f"請根據以下資訊產出中英文雙語股票分析: 股票代號: {symbol}, 目前價格: {quote.get('current_price', 'N/A')}, 產業分類: {industry_zh} ({industry_en}), 技術指標: {technical_str}, 最佳四點信號: {bfp_signal}. 請提供買入/賣出/持有建議."
-            try:
-                chat_response = openai.ChatCompletion.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "你是一位中英雙語金融分析助理，中英文內容完全對等。請以JSON格式回應: {'recommendation': 'buy' or 'sell' or 'hold', 'rationale': '中文 rationale\\nEnglish rationale', 'risk': '中文 risk\\nEnglish risk', 'summary': '中文 summary\\nEnglish summary'}"},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=999,
-                    temperature=0.6,
-                    response_format={"type": "json_object"}
-                )
-                gpt_analysis = json.loads(chat_response['choices'][0]['message']['content'])
-            except Exception as e:
-                logger.error(f"OpenAI analysis failed for {symbol}: {e}", exc_info=True)
-                gpt_analysis = {
-                    "recommendation": "N/A",
-                    "rationale": "分析失敗 / Analysis failed",
-                    "risk": "N/A",
-                    "summary": "N/A"
-                }
+            prompt = f"請根據以下資訊產出中英文雙語股票分析: 股票代號: {symbol}, 目前價格: {quote.get('current_price', 'N/A')}, 產業分類: {industry_zh} ({industry_en}), 財務指標: {metrics}, 技術指標: {technical_str}, 最佳四點信號: {bfp_signal}. 請提供買入/賣出/持有建議."
+            chat_response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "你是一位中英雙語金融分析助理，中英文內容完全對等。請以JSON格式回應: {'recommendation': 'buy' or 'sell' or 'hold', 'rationale': '中文 rationale\\nEnglish rationale', 'risk': '中文 risk\\nEnglish risk', 'summary': '中文 summary\\nEnglish summary'}"},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=999,
+                temperature=0.6,
+                response_format={"type": "json_object"}
+            )
+            gpt_analysis = json.loads(chat_response['choices'][0]['message']['content'])
             result = {
                 "symbol": symbol,
                 "quote": quote,
                 "industry_en": industry_en,
                 "industry_zh": industry_zh,
-                "metrics": {},  # Placeholder for future metrics
+                "metrics": metrics,
                 "news": news,
                 "gpt_analysis": gpt_analysis,
                 "plot_html": plot_html,
@@ -421,86 +402,43 @@ def index():
                 "bfp_signal": bfp_signal
             }
         except Exception as e:
-            logger.error(f"Processing error for {symbol}: {e}", exc_info=True)
             result = {
-                "error": f"資料讀取錯誤: {e}",
+                "error": f"資料讀取錯誤: {e} / Data retrieval error: {e}",
                 "profile": {'name': 'N/A', 'group': '未知'},
                 "news": []
             }
-    return render_template(
-        "index.html",
-        result=result,
-        symbol_input=symbol,
-        QUOTE_FIELDS=QUOTE_FIELDS,
-        METRIC_NAMES_ZH_EN=METRIC_NAMES_ZH_EN,
-        tiers=PRICING_TIERS,
-        stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
-        stripe_mode=STRIPE_MODE,
-        request_count=request_count,
-        current_tier_name=current_tier_name,
-        current_limit=current_limit
-    )
+            logger.error(f"Processing error for symbol {symbol}: {e}")
+    return render_template("index.html",
+                           result=result,
+                           symbol_input=symbol,
+                           QUOTE_FIELDS=QUOTE_FIELDS,
+                           METRIC_NAMES_ZH_EN=METRIC_NAMES_ZH_EN,
+                           tiers=PRICING_TIERS,
+                           stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
+                           stripe_mode=STRIPE_MODE,
+                           request_count=request_count,
+                           current_tier_name=current_tier_name,
+                           current_limit=current_limit)
 
-@app.route("/details/<symbol>")
-def stock_details(symbol):
-    if not re.match(r"^[A-Z0-9]{1,10}$", symbol):
-        flash("❌ 無效的股票代號", "danger")
-        return redirect(url_for("index"))
-    result = {}
-    try:
-        quote = get_quote(symbol)
-        profile = get_company_profile(symbol)
-        company_name = profile.get('name', 'Unknown')
-        news = get_stock_news(symbol, company_name)
-        df, technical = get_historical_data(symbol)
-        plot_html = get_plot_html(df, symbol)
-        bfp_signal = "無明確信號"
-        try:
-            stock = TwStock(symbol)
-            stock.fetch_31()
-            bfp = TwBestFourPoint(stock)
-            best = bfp.best_four_point()
-            if best:
-                bfp_signal = f"買入信號: {best[1]}" if best[0] else f"賣出信號: {best[1]}"
-        except Exception as e:
-            logger.error(f"BestFourPoint analysis failed for {symbol}: {e}", exc_info=True)
-        result = {
-            "symbol": symbol,
-            "quote": quote,
-            "news": news,
-            "plot_html": plot_html,
-            "technical": technical,
-            "profile": profile,
-            "bfp_signal": bfp_signal
-        }
-    except Exception as e:
-        logger.error(f"Error fetching details for {symbol}: {e}", exc_info=True)
-        result["error"] = f"資料讀取錯誤: {e}"
-    return render_template(
-        "details.html",
-        result=result,
-        QUOTE_FIELDS=QUOTE_FIELDS,
-        METRIC_NAMES_ZH_EN=METRIC_NAMES_ZH_EN
-    )
-
+# ------------------ Stripe & Subscription Routes ------------------
 @app.route("/create-checkout-session", methods=["POST"])
 def create_checkout_session():
     tier_name = request.form.get("tier")
     tier = next((t for t in PRICING_TIERS if t["name"] == tier_name), None)
     if not tier:
         logger.error(f"Invalid tier requested: {tier_name}")
-        return jsonify({"error": "無效的訂閱方案"}), 400
+        return jsonify({"error": "Invalid tier"}), 400
     if tier["name"] == "Free":
         session["subscribed"] = False
         session["paid_tier"] = 0
         session["request_count"] = 0
-        flash("✅ 已切換至免費方案", "success")
+        flash("✅ Switched to Free tier.", "success")
         return jsonify({"url": url_for("index", _external=True)})
     price_id = STRIPE_PRICE_IDS.get(tier_name)
     if not price_id or not validate_price_id(price_id, tier_name):
         logger.error(f"No valid Price ID configured for {tier_name}")
-        flash(f"⚠️ {tier_name} 訂閱目前無法使用", "warning")
-        return jsonify({"error": f"{tier_name} 訂閱目前無法使用"}), 400
+        flash(f"⚠️ Subscription for {tier_name} is currently unavailable.", "warning")
+        return jsonify({"error": f"Subscription for {tier_name} is currently unavailable"}), 400
     try:
         logger.info(f"Creating Stripe checkout session for {tier_name} with Price ID: {price_id}")
         session_stripe = stripe.checkout.Session.create(
@@ -512,8 +450,8 @@ def create_checkout_session():
         )
         return jsonify({"url": session_stripe.url})
     except Exception as e:
-        logger.error(f"Unexpected Stripe error: {e}", exc_info=True)
-        return jsonify({"error": f"意外錯誤: {str(e)}"}), 500
+        logger.error(f"Unexpected Stripe error: {e}")
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 @app.route("/payment-success/<tier_name>")
 def payment_success(tier_name):
@@ -522,24 +460,24 @@ def payment_success(tier_name):
         session["subscribed"] = True
         session["paid_tier"] = tier_index
         session["request_count"] = 0
-        flash(f"✅ {tier_name} 訂閱成功", "success")
+        flash(f"✅ Subscription successful for {tier_name} plan.", "success")
         logger.info(f"Subscription successful for {tier_name} (tier index: {tier_index})")
     return redirect(url_for("index"))
 
 @app.route("/reset", methods=["POST"])
 def reset():
     password = request.form.get("password")
-    if password == RESET_PASSWORD:
+    if password == "888888":
         session["request_count"] = 0
         session["subscribed"] = False
         session["paid_tier"] = 0
-        flash("✅ 已重置計數", "success")
+        flash("✅ Counts reset.", "success")
         logger.info("Session counts reset successfully")
     else:
-        flash("❌ 密碼錯誤", "danger")
-        logger.warning("Failed reset attempt")
+        flash("❌ Incorrect password.", "danger")
+        logger.warning("Failed reset attempt with incorrect password")
     return redirect(url_for("index"))
 
 # ------------------ Run App ------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=True)
