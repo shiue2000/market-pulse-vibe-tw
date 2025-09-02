@@ -1,3 +1,609 @@
+# -*- coding: utf-8 -*-
+
+# Content from proxy.py
+import abc
+
+from itertools import cycle
+
+
+class ProxyProvider(abc.ABC):
+    @abc.abstractmethod
+    def get_proxy(self):
+        return NotImplemented
+
+
+class NoProxyProvier(ProxyProvider):
+    def get_proxy(self):
+        return {}
+
+
+class SingleProxyProvider(ProxyProvider):
+    def __init__(self, proxy=None):
+        self._proxy = proxy
+
+    def get_proxy(self):
+        return self._proxy
+
+
+class RoundRobinProxiesProvider(ProxyProvider):
+    def __init__(self, proxies: list):
+        self._proxies = proxies
+        self._proxies_cycle = cycle(proxies)
+
+    @property
+    def proxies(self):
+        return self._proxies
+
+    @proxies.setter
+    def proxies(self, proxies: list):
+        if not isinstance(proxies, list):
+            raise ValueError("Proxies only accept list")
+
+        self._proxies = proxies
+        self._proxies_cycle = cycle(proxies)
+
+    def get_proxy(self):
+        return next(self._proxies_cycle)
+
+
+_provider_instance = NoProxyProvier()
+
+
+def reset_proxy_provider():
+    configure_proxy_provider(NoProxyProvier())
+
+
+def configure_proxy_provider(provider_instance):
+    global _provider_instance
+    if not isinstance(provider_instance, ProxyProvider):
+        raise BaseException("proxy provider should be a ProxyProvider object")
+    _provider_instance = provider_instance
+
+
+def get_proxies():
+    return _provider_instance.get_proxy()
+
+# Content from analytics.py
+# -*- coding: utf-8 -*-
+
+
+class Analytics(object):
+    def continuous(self, data):
+        diff = [1 if data[-i] > data[-i - 1] else -1 for i in range(1, len(data))]
+        cont = 0
+        for v in diff:
+            if v == diff[0]:
+                cont += 1
+            else:
+                break
+        return cont * diff[0]
+
+    def moving_average(self, data, days):
+        result = []
+        data = data[:]
+        for _ in range(len(data) - days + 1):
+            result.append(round(sum(data[-days:]) / days, 2))
+            data.pop()
+        return result[::-1]
+
+    def ma_bias_ratio(self, day1, day2):
+        """Calculate moving average bias ratio"""
+        data1 = self.moving_average(self.price, day1)
+        data2 = self.moving_average(self.price, day2)
+        result = [
+            data1[-i] - data2[-i] for i in range(1, min(len(data1), len(data2)) + 1)
+        ]
+
+        return result[::-1]
+
+    def ma_bias_ratio_pivot(self, data, sample_size=5, position=False):
+        """Calculate pivot point"""
+        sample = data[-sample_size:]
+
+        if position is True:
+            check_value = max(sample)
+            pre_check_value = max(sample) > 0
+        elif position is False:
+            check_value = min(sample)
+            pre_check_value = max(sample) < 0
+
+        return (
+            (
+                sample_size - sample.index(check_value) < 4
+                and sample.index(check_value) != sample_size - 1
+                and pre_check_value
+            ),
+            sample_size - sample.index(check_value) - 1,
+            check_value,
+        )
+
+
+class BestFourPoint(object):
+    BEST_BUY_WHY = ["量大收紅", "量縮價不跌", "三日均價由下往上", "三日均價大於六日均價"]
+    BEST_SELL_WHY = ["量大收黑", "量縮價跌", "三日均價由上往下", "三日均價小於六日均價"]
+
+    def __init__(self, stock):
+        self.stock = stock
+
+    def bias_ratio(self, position=False):
+        return self.stock.ma_bias_ratio_pivot(
+            self.stock.ma_bias_ratio(3, 6), position=position
+        )
+
+    def plus_bias_ratio(self):
+        return self.bias_ratio(True)
+
+    def mins_bias_ratio(self):
+        return self.bias_ratio(False)
+
+    def best_buy_1(self):
+        return (
+            self.stock.capacity[-1] > self.stock.capacity[-2]
+            and self.stock.price[-1] > self.stock.open[-1]
+        )
+
+    def best_buy_2(self):
+        return (
+            self.stock.capacity[-1] < self.stock.capacity[-2]
+            and self.stock.price[-1] > self.stock.open[-2]
+        )
+
+    def best_buy_3(self):
+        return (
+            self.stock.continuous(self.stock.moving_average(self.stock.price, 3)) == 1
+        )
+
+    def best_buy_4(self):
+        return (
+            self.stock.moving_average(self.stock.price, 3)[-1]
+            > self.stock.moving_average(self.stock.price, 6)[-1]
+        )
+
+    def best_sell_1(self):
+        return (
+            self.stock.capacity[-1] > self.stock.capacity[-2]
+            and self.stock.price[-1] < self.stock.open[-1]
+        )
+
+    def best_sell_2(self):
+        return (
+            self.stock.capacity[-1] < self.stock.capacity[-2]
+            and self.stock.price[-1] < self.stock.open[-2]
+        )
+
+    def best_sell_3(self):
+        return (
+            self.stock.continuous(self.stock.moving_average(self.stock.price, 3)) == -1
+        )
+
+    def best_sell_4(self):
+        return (
+            self.stock.moving_average(self.stock.price, 3)[-1]
+            < self.stock.moving_average(self.stock.price, 6)[-1]
+        )
+
+    def best_four_point_to_buy(self):
+        result = []
+        check = [
+            self.best_buy_1(),
+            self.best_buy_2(),
+            self.best_buy_3(),
+            self.best_buy_4(),
+        ]
+        if self.mins_bias_ratio() and any(check):
+            for index, v in enumerate(check):
+                if v:
+                    result.append(self.BEST_BUY_WHY[index])
+        else:
+            return False
+        return ", ".join(result)
+
+    def best_four_point_to_sell(self):
+        result = []
+        check = [
+            self.best_sell_1(),
+            self.best_sell_2(),
+            self.best_sell_3(),
+            self.best_sell_4(),
+        ]
+        if self.plus_bias_ratio() and any(check):
+            for index, v in enumerate(check):
+                if v:
+                    result.append(self.BEST_SELL_WHY[index])
+        else:
+            return False
+        return ", ".join(result)
+
+    def best_four_point(self):
+        buy = self.best_four_point_to_buy()
+        sell = self.best_four_point_to_sell()
+        if buy:
+            return (True, buy)
+        elif sell:
+            return (False, sell)
+
+        return None
+
+# Content from stock.py (modified to not require codes.py)
+# -*- coding: utf-8 -*-
+
+import datetime
+import urllib.parse
+from collections import namedtuple
+
+from proxy import get_proxies
+
+try:
+    from json.decoder import JSONDecodeError
+except ImportError:
+    JSONDecodeError = ValueError
+
+import requests
+
+TWSE_BASE_URL = "http://www.twse.com.tw/"
+TPEX_BASE_URL = "http://www.tpex.org.tw/"
+DATATUPLE = namedtuple(
+    "Data",
+    [
+        "date",
+        "capacity",
+        "turnover",
+        "open",
+        "high",
+        "low",
+        "close",
+        "change",
+        "transaction",
+    ],
+)
+
+
+class BaseFetcher(object):
+    def fetch(self, year, month, sid, retry):
+        pass
+
+    def _convert_date(self, date):
+        """Convert '106/05/01' to '2017/05/01'"""
+        return "/".join([str(int(date.split("/")[0]) + 1911)] + date.split("/")[1:])
+
+    def _make_datatuple(self, data):
+        pass
+
+    def purify(self, original_data):
+        pass
+
+
+class TWSEFetcher(BaseFetcher):
+    REPORT_URL = urllib.parse.urljoin(TWSE_BASE_URL, "exchangeReport/STOCK_DAY")
+
+    def __init__(self):
+        pass
+
+    def fetch(self, year: int, month: int, sid: str, retry: int = 5):
+        params = {"date": "%d%02d01" % (year, month), "stockNo": sid}
+        for retry_i in range(retry):
+            r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies())
+            try:
+                data = r.json()
+            except JSONDecodeError:
+                continue
+            else:
+                break
+        else:
+            # Fail in all retries
+            data = {"stat": "", "data": []}
+
+        if data["stat"] == "OK":
+            data["data"] = self.purify(data)
+        else:
+            data["data"] = []
+        return data
+
+    def _make_datatuple(self, data):
+        data[0] = datetime.datetime.strptime(self._convert_date(data[0]), "%Y/%m/%d")
+        data[1] = int(data[1].replace(",", ""))
+        data[2] = int(data[2].replace(",", ""))
+        data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
+        data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
+        data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
+        data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
+        # +/-/X表示漲/跌/不比價
+        data[7] = float(
+            0.0 if data[7].replace(",", "") == "X0.00" else data[7].replace(",", "")
+        )
+        data[8] = int(data[8].replace(",", ""))
+        return DATATUPLE(*data)
+
+    def purify(self, original_data):
+        return [self._make_datatuple(d) for d in original_data["data"]]
+
+
+class TPEXFetcher(BaseFetcher):
+    REPORT_URL = urllib.parse.urljoin(
+        TPEX_BASE_URL, "web/stock/aftertrading/daily_trading_info/st43_result.php"
+    )
+
+    def __init__(self):
+        pass
+
+    def fetch(self, year: int, month: int, sid: str, retry: int = 5):
+        params = {"d": "%d/%d" % (year - 1911, month), "stkno": sid}
+        for retry_i in range(retry):
+            r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies())
+            try:
+                data = r.json()
+            except JSONDecodeError:
+                continue
+            else:
+                break
+        else:
+            # Fail in all retries
+            data = {"aaData": []}
+
+        data["data"] = []
+        if data["aaData"]:
+            data["data"] = self.purify(data)
+        return data
+
+    def _convert_date(self, date):
+        """Convert '106/05/01' to '2017/05/01'"""
+        return "/".join([str(int(date.split("/")[0]) + 1911)] + date.split("/")[1:])
+
+    def _make_datatuple(self, data):
+        data[0] = datetime.datetime.strptime(
+            self._convert_date(data[0].replace("＊", "")), "%Y/%m/%d"
+        )
+        data[1] = int(data[1].replace(",", "")) * 1000
+        data[2] = int(data[2].replace(",", "")) * 1000
+        data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
+        data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
+        data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
+        data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
+        data[7] = float(data[7].replace(",", ""))
+        data[8] = int(data[8].replace(",", ""))
+        return DATATUPLE(*data)
+
+    def purify(self, original_data):
+        return [self._make_datatuple(d) for d in original_data["aaData"]]
+
+
+class Stock(Analytics):
+    def __init__(self, sid: str, initial_fetch: bool = True):
+        self.sid = sid
+        self.fetcher = None  # Modified: start with None, determine in fetch
+        self.raw_data = []
+        self.data = []
+
+        # Init data
+        if initial_fetch:
+            self.fetch_31()
+
+    def _month_year_iter(self, start_month, start_year, end_month, end_year):
+        ym_start = 12 * start_year + start_month - 1
+        ym_end = 12 * end_year + end_month
+        for ym in range(ym_start, ym_end):
+            y, m = divmod(ym, 12)
+            yield y, m + 1
+
+    def fetch(self, year: int, month: int):
+        """Fetch year month data"""
+        if self.fetcher is None:
+            self.fetcher = TWSEFetcher()
+        self.raw_data = [self.fetcher.fetch(year, month, self.sid)]
+        if not self.raw_data[0]["data"]:
+            self.fetcher = TPEXFetcher()
+            self.raw_data = [self.fetcher.fetch(year, month, self.sid)]
+        self.data = self.raw_data[0]["data"]
+        return self.data
+
+    def fetch_from(self, year: int, month: int):
+        """Fetch data from year, month to current year month data"""
+        self.raw_data = []
+        self.data = []
+        today = datetime.datetime.today()
+        for year, month in self._month_year_iter(month, year, today.month, today.year):
+            self.fetch(year, month)
+            self.raw_data.append(self.raw_data[-1])  # Already set in fetch
+            self.data.extend(self.data)  # Append the new data
+        return self.data
+
+    def fetch_31(self):
+        """Fetch 31 days data"""
+        today = datetime.datetime.today()
+        before = today - datetime.timedelta(days=60)
+        self.fetch_from(before.year, before.month)
+        self.data = self.data[-31:]
+        return self.data
+
+    @property
+    def date(self):
+        return [d.date for d in self.data]
+
+    @property
+    def capacity(self):
+        return [d.capacity for d in self.data]
+
+    @property
+    def turnover(self):
+        return [d.turnover for d in self.data]
+
+    @property
+    def price(self):
+        return [d.close for d in self.data]
+
+    @property
+    def high(self):
+        return [d.high for d in self.data]
+
+    @property
+    def low(self):
+        return [d.low for d in self.data]
+
+    @property
+    def open(self):
+        return [d.open for d in self.data]
+
+    @property
+    def close(self):
+        return [d.close for d in self.data]
+
+    @property
+    def change(self):
+        return [d.change for d in self.data]
+
+    @property
+    def transaction(self):
+        return [d.transaction for d in self.data]
+
+# Content from realtime.py (modified to try both tse and otc)
+# -*- coding: utf-8 -*-
+
+import datetime
+import json
+import time
+import requests
+import sys
+
+from proxy import get_proxies
+
+SESSION_URL = "http://mis.twse.com.tw/stock/index.jsp"
+STOCKINFO_URL = (
+    "http://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={stock_id}&_={time}"
+)
+
+# Mock data
+mock = False
+
+
+def _format_stock_info(data) -> dict:
+    result = {"timestamp": 0.0, "info": {}, "realtime": {}}
+
+    # Timestamp
+    result["timestamp"] = int(data["tlong"]) / 1000
+
+    # Information
+    result["info"]["code"] = data["c"]
+    result["info"]["channel"] = data["ch"]
+    result["info"]["name"] = data["n"]
+    result["info"]["fullname"] = data["nf"]
+    result["info"]["time"] = datetime.datetime.fromtimestamp(
+        int(data["tlong"]) / 1000
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Process best result
+    def _split_best(d):
+        if d:
+            return d.strip("_").split("_")
+        return d
+
+    # Realtime information
+    result["realtime"]["latest_trade_price"] = data.get("z", None)
+    result["realtime"]["trade_volume"] = data.get("tv", None)
+    result["realtime"]["accumulate_trade_volume"] = data.get("v", None)
+    result["realtime"]["best_bid_price"] = _split_best(data.get("b", None))
+    result["realtime"]["best_bid_volume"] = _split_best(data.get("g", None))
+    result["realtime"]["best_ask_price"] = _split_best(data.get("a", None))
+    result["realtime"]["best_ask_volume"] = _split_best(data.get("f", None))
+    result["realtime"]["open"] = data.get("o", None)
+    result["realtime"]["high"] = data.get("h", None)
+    result["realtime"]["low"] = data.get("l", None)
+    result["realtime"]["previous_close"] = data.get("y", None)  # Added previous close if available, note: in original it's "pc" but in twstock it's "y" for yesterday close
+
+    # Success fetching
+    result["success"] = True
+
+    return result
+
+
+def _join_stock_id(stocks, prefix='tse'):
+    if isinstance(stocks, list):
+        return "|".join(
+            [f"{prefix}_{s}.tw" for s in stocks]
+        )
+    return f"{prefix}_{stocks}.tw"
+
+
+def get_raw(stocks) -> dict:
+    req = requests.Session()
+    req.get(SESSION_URL, proxies=get_proxies())
+
+    # Try tse first
+    stock_id = _join_stock_id(stocks, 'tse')
+    r = req.get(
+        STOCKINFO_URL.format(
+            stock_id=stock_id, time=int(time.time()) * 1000
+        )
+    )
+
+    if sys.version_info < (3, 5):
+        try:
+            data = r.json()
+        except ValueError:
+            data = {"rtmessage": "json decode error", "rtcode": "5000"}
+    else:
+        try:
+            data = r.json()
+        except json.decoder.JSONDecodeError:
+            data = {"rtmessage": "json decode error", "rtcode": "5000"}
+
+    if "msgArray" not in data or not data["msgArray"]:
+        # Try otc
+        stock_id = _join_stock_id(stocks, 'otc')
+        r = req.get(
+            STOCKINFO_URL.format(
+                stock_id=stock_id, time=int(time.time()) * 1000
+            )
+        )
+        if sys.version_info < (3, 5):
+            try:
+                data = r.json()
+            except ValueError:
+                data = {"rtmessage": "json decode error", "rtcode": "5000"}
+        else:
+            try:
+                data = r.json()
+            except json.decoder.JSONDecodeError:
+                data = {"rtmessage": "json decode error", "rtcode": "5000"}
+
+    return data
+
+
+def get(stocks, retry=3):
+    # Prepare data
+    data = get_raw(stocks) if not mock else {"msgArray": []}  # Mock not used
+
+    # Set success
+    data["success"] = False
+
+    # JSONdecode error, could be too fast, retry
+    if data["rtcode"] == "5000":
+        # XXX: Stupit retry, you will dead here
+        if retry:
+            return get(stocks, retry - 1)
+        return data
+
+    # No msgArray, dead
+    if "msgArray" not in data:
+        return data
+
+    # Check have data
+    if not len(data["msgArray"]):
+        data["rtmessage"] = "Empty Query."
+        data["rtcode"] = "5001"
+        return data
+
+    # Return multiple stock data
+    if isinstance(stocks, list):
+        result = {
+            data["info"]["code"]: data
+            for data in map(_format_stock_info, data["msgArray"])
+        }
+        result["success"] = True
+        return result
+
+    return _format_stock_info(data["msgArray"][0])
+
+# Revised Flask app code
 import datetime
 import requests
 from flask import Flask, render_template, request, session, redirect, url_for, flash, jsonify
@@ -7,10 +613,9 @@ import stripe
 from dotenv import load_dotenv
 import logging
 import time
-import yfinance as yf
+import yfinance as yf  # Kept for potential US stocks, but not used for Taiwan
 import pandas as pd
 import json,os
-
 # ------------------ Load environment ------------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -21,7 +626,6 @@ STRIPE_TEST_PUBLISHABLE_KEY = os.getenv("STRIPE_TEST_PUBLISHABLE_KEY")
 STRIPE_LIVE_SECRET_KEY = os.getenv("STRIPE_LIVE_SECRET_KEY")
 STRIPE_LIVE_PUBLISHABLE_KEY = os.getenv("STRIPE_LIVE_PUBLISHABLE_KEY")
 STRIPE_MODE = os.getenv("STRIPE_MODE", "test").lower()
-
 # Stripe Price IDs
 STRIPE_PRICE_IDS = {
     "Free": os.getenv("STRIPE_PRICE_TIER0"),
@@ -30,10 +634,8 @@ STRIPE_PRICE_IDS = {
     "Tier 3": os.getenv("STRIPE_PRICE_TIER3"),
     "Tier 4": os.getenv("STRIPE_PRICE_TIER4"),
 }
-
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY not set in .env")
-
 # Set Stripe keys
 if STRIPE_MODE == "live":
     STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
@@ -41,21 +643,16 @@ if STRIPE_MODE == "live":
 else:
     STRIPE_SECRET_KEY = STRIPE_TEST_SECRET_KEY
     STRIPE_PUBLISHABLE_KEY = STRIPE_TEST_PUBLISHABLE_KEY
-
 if not STRIPE_SECRET_KEY or not STRIPE_PUBLISHABLE_KEY:
     raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in .env")
-
 stripe.api_key = STRIPE_SECRET_KEY
-
 # ------------------ Logger setup ------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 # ------------------ Initialize Flask & OpenAI ------------------
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 openai.api_key = OPENAI_API_KEY
-
 # ------------------ Stock app config ------------------
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 industry_mapping = {
@@ -95,7 +692,6 @@ QUOTE_FIELDS = {
     "daily_change": ("漲跌幅(%)", "Change Percent"),
     "volume": ("交易量", "Volume")
 }
-
 # ------------------ Stripe pricing tiers ------------------
 PRICING_TIERS = [
     {"name": "Free", "limit": 50, "price": 0},
@@ -104,11 +700,9 @@ PRICING_TIERS = [
     {"name": "Tier 3", "limit": 400, "price": 29.99},
     {"name": "Tier 4", "limit": 800, "price": 39.99},
 ]
-
 # ------------------ Helper functions ------------------
 def validate_price_id(price_id, tier_name):
     return bool(price_id)
-
 def get_finnhub_json(endpoint, params):
     url = f"https://finnhub.io/api/v1/{endpoint}"
     params["token"] = FINNHUB_API_KEY
@@ -121,25 +715,42 @@ def get_finnhub_json(endpoint, params):
             logger.warning(f"[Finnhub Error] {endpoint}: {e}")
             time.sleep(2)
     return {}
-
-def get_quote(symbol):
-    data = get_finnhub_json("quote", {"symbol": symbol})
-    quote = {}
-    if data:
+def get_quote(symbol, is_taiwan=False):
+    if is_taiwan:
+        data = get(symbol)
+        if not data.get('success'):
+            return {}
+        rt = data['realtime']
+        current = rt['latest_trade_price'] if rt['latest_trade_price'] != '--' else None
+        prev = rt.get('previous_close') if rt.get('previous_close') != '--' else None
         quote = {
-            'current_price': round(data.get('c', 'N/A'), 4),
-            'open': round(data.get('o', 'N/A'), 4),
-            'high': round(data.get('h', 'N/A'), 4),
-            'low': round(data.get('l', 'N/A'), 4),
-            'previous_close': round(data.get('pc', 'N/A'), 4),
-            'daily_change': round(data.get('dp', 'N/A'), 4),
-            'volume': 'N/A'  # Will be updated later if available
+            'current_price': float(current) if current else 'N/A',
+            'open': float(rt['open']) if rt['open'] != '--' else 'N/A',
+            'high': float(rt['high']) if rt['high'] != '--' else 'N/A',
+            'low': float(rt['low']) if rt['low'] != '--' else 'N/A',
+            'previous_close': float(prev) if prev else 'N/A',
+            'daily_change': round((float(current) - float(prev)) / float(prev) * 100, 4) if current and prev and float(prev) != 0 else 'N/A',
+            'volume': rt.get('accumulate_trade_volume', 'N/A')
         }
-    return quote
-
-def get_metrics(symbol):
+        return quote
+    else:
+        data = get_finnhub_json("quote", {"symbol": symbol})
+        quote = {}
+        if data:
+            quote = {
+                'current_price': round(data.get('c', 'N/A'), 4),
+                'open': round(data.get('o', 'N/A'), 4),
+                'high': round(data.get('h', 'N/A'), 4),
+                'low': round(data.get('l', 'N/A'), 4),
+                'previous_close': round(data.get('pc', 'N/A'), 4),
+                'daily_change': round(data.get('dp', 'N/A'), 4),
+                'volume': 'N/A'  # Updated later
+            }
+        return quote
+def get_metrics(symbol, is_taiwan=False):
+    if is_taiwan:
+        symbol = f"{symbol}-TW"
     return get_finnhub_json("stock/metric", {"symbol": symbol, "metric": "all"}).get("metric", {})
-
 def filter_metrics(metrics):
     filtered = {}
     metric_map = {
@@ -164,8 +775,9 @@ def filter_metrics(metrics):
             except:
                 filtered[new_key] = str(v)
     return filtered
-
-def get_recent_news(symbol):
+def get_recent_news(symbol, is_taiwan=False):
+    if is_taiwan:
+        symbol = f"{symbol}-TW"
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     past = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
     news = get_finnhub_json("company-news", {"symbol": symbol, "from": past, "to": today})
@@ -178,10 +790,10 @@ def get_recent_news(symbol):
         except:
             n["datetime"] = "未知時間"
     return news
-
-def get_company_profile(symbol):
+def get_company_profile(symbol, is_taiwan=False):
+    if is_taiwan:
+        symbol = f"{symbol}-TW"
     return get_finnhub_json("stock/profile2", {"symbol": symbol})
-
 def calculate_rsi(series, period=14):
     delta = series.diff(1)
     gain = delta.where(delta > 0, 0)
@@ -191,29 +803,49 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]
-
-def get_historical_data(symbol):
-    df = pd.DataFrame()
-    for _ in range(3):
-        try:
-            df = yf.download(symbol, period="1y", progress=False)
-            if not df.empty:
-                break
-            time.sleep(2)
-        except Exception as e:
-            logger.warning(f"[YF Historical Error] {symbol}: {e}")
-            time.sleep(2)
-    if df.empty:
-        return pd.DataFrame(), {}
+def get_historical_data(symbol, is_taiwan=False):
+    if is_taiwan:
+        stock = Stock(symbol)
+        today = datetime.datetime.today()
+        before = today - datetime.timedelta(days=365)
+        stock.fetch_from(before.year, before.month)
+        if not stock.data:
+            return pd.DataFrame(), {}
+        data_dict = {
+            'Date': stock.date,
+            'Open': stock.open,
+            'High': stock.high,
+            'Low': stock.low,
+            'Close': stock.close,
+            'Volume': stock.capacity
+        }
+        df = pd.DataFrame(data_dict)
+        df.set_index('Date', inplace=True)
+        df = df.dropna()  # Drop rows with None
+    else:
+        df = pd.DataFrame()
+        for _ in range(3):
+            try:
+                df = yf.download(symbol, period="1y", progress=False)
+                if not df.empty:
+                    break
+                time.sleep(2)
+            except Exception as e:
+                logger.warning(f"[YF Historical Error] {symbol}: {e}")
+                time.sleep(2)
+        if df.empty:
+            return pd.DataFrame(), {}
     # Compute technical indicators
-    ma50 = df['Close'].rolling(50).mean().iloc[-1]
+    window_50 = min(50, len(df))
+    ma50 = df['Close'].rolling(window=window_50).mean().iloc[-1]
     rsi = calculate_rsi(df['Close'])
-    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-    macd = ema12.iloc[-1] - ema26.iloc[-1]
-    support = df['Low'].tail(20).min()
-    resistance = df['High'].tail(20).max()
-    volume = df['Volume'].iloc[-1]
+    ema12 = df['Close'].ewm(span=12, adjust=False).mean().iloc[-1]
+    ema26 = df['Close'].ewm(span=26, adjust=False).mean().iloc[-1]
+    macd = ema12 - ema26
+    tail_20 = min(20, len(df))
+    support = df['Low'].tail(tail_20).min()
+    resistance = df['High'].tail(tail_20).max()
+    volume = df['Volume'].iloc[-1] if 'Volume' in df.columns else 'N/A'
     technical = {
         'ma50': round(ma50, 2),
         'rsi': round(rsi, 2),
@@ -223,7 +855,6 @@ def get_historical_data(symbol):
         'volume': volume
     }
     return df, technical
-
 def get_plot_html(df, symbol):
     if df.empty or 'Close' not in df.columns:
         return "<p class='text-danger'>📊 無法取得股價趨勢圖</p>"
@@ -235,12 +866,11 @@ def get_plot_html(df, symbol):
     fig.update_layout(
         title=f"{symbol} 最近7日收盤價 / 7-Day Closing Price Trend",
         xaxis_title="日期 / Date",
-        yaxis_title="收盤價 (USD)",
+        yaxis_title="收盤價 (TWD)",
         template="plotly_white",
         height=400
     )
     return fig.to_html(full_html=False, include_plotlyjs='cdn', default_height="400px", default_width="100%")
-
 # ------------------ Flask routes ------------------
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -251,7 +881,7 @@ def index():
     request_count = session.get("request_count", 0)
     current_limit = current_tier["limit"]
     current_tier_name = current_tier["name"]
-    
+   
     if request.method == "POST":
         if request_count >= current_limit:
             result["error"] = f"已達 {current_tier_name} 等級請求上限，請升級方案"
@@ -259,7 +889,7 @@ def index():
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
-        
+       
         symbol = request.form.get("symbol", "").strip().upper()
         if not symbol:
             result["error"] = "請輸入股票代號 / Please enter a stock symbol"
@@ -267,21 +897,32 @@ def index():
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
-
         try:
             session["request_count"] = request_count + 1
-            quote = get_quote(symbol)
-            metrics = filter_metrics(get_metrics(symbol))
-            news = get_recent_news(symbol)
-            profile = get_company_profile(symbol)
+            is_taiwan = len(symbol) == 4 and symbol.isdigit()
+            quote = get_quote(symbol, is_taiwan)
+            metrics = filter_metrics(get_metrics(symbol, is_taiwan))
+            news = get_recent_news(symbol, is_taiwan)
+            profile = get_company_profile(symbol, is_taiwan)
             industry_en = profile.get("finnhubIndustry", "Unknown")
             industry_zh = industry_mapping.get(industry_en, "未知")
-            df, technical = get_historical_data(symbol)
-            quote['volume'] = technical.get('volume', 'N/A')
+            df, technical = get_historical_data(symbol, is_taiwan)
+            quote['volume'] = technical.get('volume', quote.get('volume', 'N/A'))
             plot_html = get_plot_html(df, symbol)
-            
             technical_str = ", ".join(f"{k.upper()}: {v}" for k, v in technical.items())
-            prompt = f"請根據以下資訊產出中英文雙語股票分析: 股票代號: {symbol}, 目前價格: {quote.get('current_price','N/A')}, 產業分類: {industry_zh} ({industry_en}), 財務指標: {metrics}, 技術指標: {technical_str}. 請提供買入/賣出/持有建議."
+            bfp_signal = ""
+            if is_taiwan:
+                stock = Stock(symbol)
+                bfp = BestFourPoint(stock)
+                best = bfp.best_four_point()
+                if best:
+                    if best[0]:
+                        bfp_signal = f"買入信號: {best[1]}"
+                    else:
+                        bfp_signal = f"賣出信號: {best[1]}"
+                else:
+                    bfp_signal = "無明確信號"
+            prompt = f"請根據以下資訊產出中英文雙語股票分析: 股票代號: {symbol}, 目前價格: {quote.get('current_price','N/A')}, 產業分類: {industry_zh} ({industry_en}), 財務指標: {metrics}, 技術指標: {technical_str}, 最佳四點信號: {bfp_signal}. 請提供買入/賣出/持有建議."
             chat_response = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -298,7 +939,7 @@ def index():
                 gpt_analysis = chat_response['choices'][0]['message']['content'].strip()
             if isinstance(gpt_analysis, str):
                 gpt_analysis = {'summary': gpt_analysis + "\n\n---\n\n*以上分析僅供參考，投資有風險*"}
-            
+           
             result = {
                 "symbol": symbol,
                 "quote": quote,
@@ -313,7 +954,6 @@ def index():
         except Exception as e:
             result = {"error": f"資料讀取錯誤: {e}"}
             logger.error(f"Processing error for symbol {symbol}: {e}")
-
     return render_template("index.html",
                            result=result,
                            symbol_input=symbol,
@@ -325,7 +965,6 @@ def index():
                            request_count=request_count,
                            current_tier_name=current_tier_name,
                            current_limit=current_limit)
-
 # ------------------ Stripe & Subscription Routes ------------------
 @app.route("/create-checkout-session", methods=["POST"])
 def create_checkout_session():
@@ -334,20 +973,18 @@ def create_checkout_session():
     if not tier:
         logger.error(f"Invalid tier requested: {tier_name}")
         return jsonify({"error": "Invalid tier"}), 400
-    
+   
     if tier["name"] == "Free":
         session["subscribed"] = False
         session["paid_tier"] = 0
         session["request_count"] = 0
         flash("✅ Switched to Free tier.", "success")
         return jsonify({"url": url_for("index", _external=True)})
-
     price_id = STRIPE_PRICE_IDS.get(tier_name)
     if not price_id or not validate_price_id(price_id, tier_name):
         logger.error(f"No valid Price ID configured for {tier_name}")
         flash(f"⚠️ Subscription for {tier_name} is currently unavailable.", "warning")
         return jsonify({"error": f"Subscription for {tier_name} is currently unavailable"}), 400
-
     try:
         logger.info(f"Creating Stripe checkout session for {tier_name} with Price ID: {price_id}")
         session_stripe = stripe.checkout.Session.create(
@@ -361,7 +998,6 @@ def create_checkout_session():
     except Exception as e:
         logger.error(f"Unexpected Stripe error: {e}")
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
-
 @app.route("/payment-success/<tier_name>")
 def payment_success(tier_name):
     tier_index = next((i for i, t in enumerate(PRICING_TIERS) if t["name"] == tier_name), None)
@@ -372,7 +1008,6 @@ def payment_success(tier_name):
         flash(f"✅ Subscription successful for {tier_name} plan.", "success")
         logger.info(f"Subscription successful for {tier_name} (tier index: {tier_index})")
     return redirect(url_for("index"))
-
 @app.route("/reset", methods=["POST"])
 def reset():
     password = request.form.get("password")
@@ -386,8 +1021,6 @@ def reset():
         flash("❌ Incorrect password.", "danger")
         logger.warning("Failed reset attempt with incorrect password")
     return redirect(url_for("index"))
-
 # ------------------ Run App ------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=True)
-
