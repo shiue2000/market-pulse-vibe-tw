@@ -44,7 +44,7 @@
         {% if result.error %}
         <section class="bg-red-50 border-l-4 border-red-500 p-4 rounded-md mb-6">
             <p class="text-red-700 font-medium">❌ {{ result.error }}</p>
-            <p class="text-sm text-red-600 mt-2">請檢查股票代號是否正確或稍後重試 | Please check if the stock symbol is correct or try again later.</p>
+            <p class="text-sm text-red-600 mt-2">請檢查股票代號是否正確 (需為4位數字，如 2330) 或稍後重試 | Please check if the stock symbol is correct (must be 4 digits, e.g., 2330) or try again later.</p>
         </section>
         {% endif %}
         {% if result.symbol %}
@@ -159,25 +159,30 @@
                 </table>
             </div>
         </section>
-        {% if result.news %}
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <h3 class="text-lg font-semibold text-gray-700 mb-4">📰 近期新聞 | Recent News</h3>
-            <div class="space-y-4">
+            <div id="newsLoading" class="hidden flex items-center justify-center text-gray-600 text-sm mb-4">
+                <svg class="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                載入新聞中... | Loading news...
+            </div>
+            <div id="newsContent" class="space-y-4">
+                {% if result.news %}
                 {% for item in result.news %}
-                <div class="border-b border-gray-200 pb-2">
-                    <p class="text-sm font-medium text-gray-800">{{ item.title | default('N/A') }}</p>
+                <div class="border-b border-gray-200 pb-2 hover:bg-gray-50 transition duration-150">
+                    <p class="text-sm font-medium text-gray-800 truncate">{{ item.title | default('N/A') }}</p>
                     <p class="text-xs text-gray-600">Source: {{ item.source | default('Unknown') }} | Published: {{ item.published_at | default('Unknown time') }}</p>
                     <a href="{{ item.url | default('#') }}" target="_blank" class="text-sm text-indigo-600 hover:underline">查看詳情 | View Details</a>
                 </div>
                 {% endfor %}
+                {% else %}
+                <p class="text-sm text-gray-600">無相關新聞 | No related news available</p>
+                <p class="text-xs text-gray-500 mt-2">試試其他股票代號或稍後重試 | Try another stock symbol or check back later</p>
+                {% endif %}
             </div>
         </section>
-        {% else %}
-        <section class="bg-white rounded-lg shadow-md p-6 mb-6">
-            <h3 class="text-lg font-semibold text-gray-700 mb-4">📰 近期新聞 | Recent News</h3>
-            <p class="text-sm text-gray-600">無相關新聞 | No related news available</p>
-        </section>
-        {% endif %}
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <h2 class="text-lg font-semibold text-gray-700 mb-4">選擇您的方案 | Select Your Plan</h2>
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
@@ -223,6 +228,7 @@
     <footer class="bg-gray-800 text-white py-6">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
             <p class="text-sm">© 2025 股票分析平台 | Stock Analysis Platform. All rights reserved.</p>
+            <p class="text-xs mt-2">如有問題，請聯繫我們 | Report issues at <a href="mailto:support@stockplatform.com" class="text-indigo-300 hover:underline">support@stockplatform.com</a></p>
         </div>
     </footer>
     <script>
@@ -231,18 +237,24 @@
             const btn = this.querySelector("button[type=submit]");
             const input = document.getElementById("symbolInput");
             const symbol = input.value.trim().toUpperCase();
-            const isTaiwanSymbol = /^\d{4}$/.test(symbol); // Check for 4-digit Taiwan stock code
             if (!symbol) {
                 alert("請輸入股票代號 | Please enter a stock symbol");
                 return;
             }
-            if (isTaiwanSymbol && !/^\d{4}$/.test(symbol)) {
-                alert("台灣股票代號應為4位數字 | Taiwan stock symbol should be a 4-digit number");
+            if (!/^\d{4}$/.test(symbol)) {
+                alert("台灣股票代號應為4位數字 | Taiwan stock symbol must be a 4-digit number");
                 return;
             }
             btn.disabled = true;
             document.getElementById("submitText").textContent = "處理中... | Processing...";
             document.getElementById("loadingSpinner").classList.remove("hidden");
+            // Show news loading state
+            const newsLoading = document.getElementById("newsLoading");
+            const newsContent = document.getElementById("newsContent");
+            if (newsLoading && newsContent) {
+                newsLoading.classList.remove("hidden");
+                newsContent.classList.add("hidden");
+            }
             setTimeout(() => this.submit(), 100);
         });
         document.querySelectorAll('.tierForm').forEach(form => {
@@ -288,6 +300,15 @@
                     document.getElementById("resetText").textContent = originalText;
                     document.getElementById("resetSpinner").classList.add("hidden");
                 });
+        });
+        // Hide news loading state on page load if no submission
+        window.addEventListener('load', () => {
+            const newsLoading = document.getElementById("newsLoading");
+            const newsContent = document.getElementById("newsContent");
+            if (newsLoading && newsContent) {
+                newsLoading.classList.add("hidden");
+                newsContent.classList.remove("hidden");
+            }
         });
     </script>
 </body>
