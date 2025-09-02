@@ -265,17 +265,17 @@ def get_stock_news(symbol, company_name, limit=10):
         Fetch the top {limit} most relevant news articles about the company {company_name} (stock symbol: {symbol}) from the past 30 days.
         Return the results in JSON format with the following structure for each article:
         {{
-            "title": "article title",
-            "url": "article URL",
+            "title": "article title in English or Chinese",
+            "url": "valid, real article URL (must not be a placeholder like example.com, example.org, or example.net)",
             "published_at": "publication date in YYYY-MM-DD format",
             "source": "source name"
         }}
-        Ensure the articles are in English or Chinese, directly related to the company or stock, and have valid URLs (not placeholder domains like example.com).
+        Ensure the articles are directly related to the company or stock, written in English or Chinese, and have valid, accessible URLs from reputable sources (e.g., TechNews, Bloomberg, Reuters). Exclude any articles with placeholder or invalid URLs.
         """
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a financial news assistant capable of fetching and summarizing recent news articles. Provide accurate and relevant news data in JSON format with valid URLs."},
+                {"role": "system", "content": "You are a financial news assistant capable of fetching and summarizing recent news articles. Provide accurate and relevant news data in JSON format with valid URLs from real sources."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=2000,
@@ -289,11 +289,11 @@ def get_stock_news(symbol, company_name, limit=10):
             article for article in news
             if article.get('url') and not any(
                 invalid in article['url'].lower() for invalid in ['example.com', 'example.org', 'example.net']
-            )
+            ) and article['url'].startswith(('http://', 'https://'))
         ]
         if len(valid_news) < len(news):
             logger.warning(f"Filtered out {len(news) - len(valid_news)} articles with invalid URLs for {symbol}")
-        logger.info(f"Fetched {len(valid_news)} news articles for {symbol}")
+        logger.info(f"Fetched {len(valid_news)} news articles for {symbol}: {[article['title'] for article in valid_news]}")
         return valid_news
     except Exception as e:
         logger.error(f"Error fetching news for {symbol}: {e}", exc_info=True)
@@ -316,15 +316,15 @@ def calculate_rsi(series, period=14):
 def get_plot_html(df, symbol):
     if df.empty or 'Close' not in df.columns:
         logger.warning(f"No data to plot for {symbol}")
-        return "<p class='text-danger'>📊 無法取得股價趨勢圖 / No chart available</p>"
+        return "<p class='text-danger'>📊 無法取得股價趨勢圖</p>"
     df_plot = df.tail(7)
     dates = df_plot.index.strftime('%Y-%m-%d').tolist()
     closes = df_plot['Close'].round(2).tolist()
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=dates, y=closes, mode='lines+markers', name='Close Price'))
     fig.update_layout(
-        title=f"{symbol} 最近7日收盤價 / 7-Day Closing Price Trend",
-        xaxis_title="日期 / Date",
+        title=f"{symbol} 最近7日收盤價",
+        xaxis_title="日期",
         yaxis_title="收盤價 (TWD)",
         template="plotly_white",
         height=400
@@ -343,21 +343,21 @@ def index():
     current_tier_name = current_tier["name"]
     if request.method == "POST":
         if request_count >= current_limit:
-            result["error"] = f"已達 {current_tier_name} 等級請求上限，請升級方案 / Request limit reached for {current_tier_name} plan"
+            result["error"] = f"已達 {current_tier_name} 等級請求上限，請升級方案"
             return render_template("index.html", result=result, symbol_input=symbol,
                                  tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                  stripe_mode=STRIPE_MODE, request_count=request_count,
                                  current_tier_name=current_tier_name, current_limit=current_limit)
         symbol = request.form.get("symbol", "").strip().upper()
         if not symbol or not re.match(r"^[A-Z0-9]{1,10}$", symbol):
-            result["error"] = "無效的股票代號 / Invalid stock symbol"
+            result["error"] = "無效的股票代號"
             return render_template("index.html", result=result, symbol_input=symbol,
                                  tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                  stripe_mode=STRIPE_MODE, request_count=request_count,
                                  current_tier_name=current_tier_name, current_limit=current_limit)
         if symbol not in twcodes:
             result = {
-                "error": f"無效的股票代號: {symbol} / Invalid stock symbol: {symbol}",
+                "error": f"無效的股票代號: {symbol}",
                 "profile": {'name': 'N/A', 'group': '未知'},
                 "news": []
             }
@@ -375,7 +375,7 @@ def index():
             industry_en = next((en for en, zh in industry_mapping.items() if zh == industry_zh), "Unknown")
             df, technical = get_historical_data(symbol)
             plot_html = get_plot_html(df, symbol)
-            bfp_signal = "無明確信號 / No clear signal"
+            bfp_signal = "無明確信號"
             try:
                 stock = TwStock(symbol)
                 stock.fetch_31()
@@ -423,7 +423,7 @@ def index():
         except Exception as e:
             logger.error(f"Processing error for {symbol}: {e}", exc_info=True)
             result = {
-                "error": f"資料讀取錯誤: {e} / Data retrieval error: {e}",
+                "error": f"資料讀取錯誤: {e}",
                 "profile": {'name': 'N/A', 'group': '未知'},
                 "news": []
             }
@@ -444,7 +444,7 @@ def index():
 @app.route("/details/<symbol>")
 def stock_details(symbol):
     if not re.match(r"^[A-Z0-9]{1,10}$", symbol):
-        flash("❌ Invalid stock symbol.", "danger")
+        flash("❌ 無效的股票代號", "danger")
         return redirect(url_for("index"))
     result = {}
     try:
@@ -454,7 +454,7 @@ def stock_details(symbol):
         news = get_stock_news(symbol, company_name)
         df, technical = get_historical_data(symbol)
         plot_html = get_plot_html(df, symbol)
-        bfp_signal = "無明確信號 / No clear signal"
+        bfp_signal = "無明確信號"
         try:
             stock = TwStock(symbol)
             stock.fetch_31()
@@ -475,7 +475,7 @@ def stock_details(symbol):
         }
     except Exception as e:
         logger.error(f"Error fetching details for {symbol}: {e}", exc_info=True)
-        result["error"] = f"資料讀取錯誤: {e} / Data retrieval error: {e}"
+        result["error"] = f"資料讀取錯誤: {e}"
     return render_template(
         "details.html",
         result=result,
@@ -489,18 +489,18 @@ def create_checkout_session():
     tier = next((t for t in PRICING_TIERS if t["name"] == tier_name), None)
     if not tier:
         logger.error(f"Invalid tier requested: {tier_name}")
-        return jsonify({"error": "Invalid tier"}), 400
+        return jsonify({"error": "無效的訂閱方案"}), 400
     if tier["name"] == "Free":
         session["subscribed"] = False
         session["paid_tier"] = 0
         session["request_count"] = 0
-        flash("✅ Switched to Free tier.", "success")
+        flash("✅ 已切換至免費方案", "success")
         return jsonify({"url": url_for("index", _external=True)})
     price_id = STRIPE_PRICE_IDS.get(tier_name)
     if not price_id or not validate_price_id(price_id, tier_name):
         logger.error(f"No valid Price ID configured for {tier_name}")
-        flash(f"⚠️ Subscription for {tier_name} is currently unavailable.", "warning")
-        return jsonify({"error": f"Subscription for {tier_name} is currently unavailable"}), 400
+        flash(f"⚠️ {tier_name} 訂閱目前無法使用", "warning")
+        return jsonify({"error": f"{tier_name} 訂閱目前無法使用"}), 400
     try:
         logger.info(f"Creating Stripe checkout session for {tier_name} with Price ID: {price_id}")
         session_stripe = stripe.checkout.Session.create(
@@ -513,7 +513,7 @@ def create_checkout_session():
         return jsonify({"url": session_stripe.url})
     except Exception as e:
         logger.error(f"Unexpected Stripe error: {e}", exc_info=True)
-        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+        return jsonify({"error": f"意外錯誤: {str(e)}"}), 500
 
 @app.route("/payment-success/<tier_name>")
 def payment_success(tier_name):
@@ -522,7 +522,7 @@ def payment_success(tier_name):
         session["subscribed"] = True
         session["paid_tier"] = tier_index
         session["request_count"] = 0
-        flash(f"✅ Subscription successful for {tier_name} plan.", "success")
+        flash(f"✅ {tier_name} 訂閱成功", "success")
         logger.info(f"Subscription successful for {tier_name} (tier index: {tier_index})")
     return redirect(url_for("index"))
 
@@ -533,10 +533,10 @@ def reset():
         session["request_count"] = 0
         session["subscribed"] = False
         session["paid_tier"] = 0
-        flash("✅ Counts reset.", "success")
+        flash("✅ 已重置計數", "success")
         logger.info("Session counts reset successfully")
     else:
-        flash("❌ Incorrect password.", "danger")
+        flash("❌ 密碼錯誤", "danger")
         logger.warning("Failed reset attempt")
     return redirect(url_for("index"))
 
