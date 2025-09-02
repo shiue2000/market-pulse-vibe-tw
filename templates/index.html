@@ -3,10 +3,11 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>📊 股票分析平台 (台股)| Taiwan Stock Analysis Platform</title>
+    <title>📊 股票分析平台 (台股) | Taiwan Stock Analysis Platform</title>
     <script src="https://js.stripe.com/v3/"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 </head>
 <body class="bg-gradient-to-r from-teal-500 to-pink-400 font-inter text-gray-900 antialiased min-h-screen flex flex-col">
     <header class="bg-indigo-600 shadow-sm">
@@ -19,31 +20,8 @@
     </header>
     <main class="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
-            <h2 class="text-lg font-semibold text-gray-700 mb-4">選擇您的方案 | Select Your Plan</h2>
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-                {% for tier in tiers %}
-                <div class="tier-btn">
-                    {% if current_tier_name == tier.name %}
-                    <button type="button" disabled
-                            class="w-full bg-gray-300 text-gray-600 px-4 py-2 rounded-md cursor-not-allowed text-center">
-                        {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests) (已選擇 | Selected)
-                    </button>
-                    {% else %}
-                    <form class="tierForm" method="POST" action="/create-checkout-session">
-                        <input type="hidden" name="tier" value="{{ tier.name }}">
-                        <button type="submit"
-                                class="w-full bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 transition duration-200 text-center">
-                            {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests)
-                        </button>
-                    </form>
-                    {% endif %}
-                </div>
-                {% endfor %}
-            </div>
-        </section>
-        <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <div class="flex items-center justify-between mb-4">
-                <h2 class="text-lg font-semibold text-gray-700">股票分析 (台股)| Taiwan Stock Analysis</h2>
+                <h2 class="text-lg font-semibold text-gray-700">股票分析 (台股) | Taiwan Stock Analysis</h2>
                 <span class="text-sm text-gray-600">
                     當前方案 | Current Plan: {{ current_tier_name | default('Free') }} | 請求次數 | Request Count: {{ request_count | default(0) }} / {{ current_limit | default(50) }}
                 </span>
@@ -71,6 +49,10 @@
         {% endif %}
         {% if result.symbol %}
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h3 class="text-lg font-semibold text-gray-700 mb-4">📊 價格走勢圖 | Price Trend Chart</h3>
+            {{ result.plot_html | safe }}
+        </section>
+        <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <h3 class="text-lg font-semibold text-gray-700 mb-4">🤖 AI 技術分析與投資建議 | AI Technical Analysis & Recommendations</h3>
             <div class="border-l-4 border-teal-500 p-4 bg-gray-50 rounded-md space-y-6">
                 <div>
@@ -78,9 +60,8 @@
                     <p class="text-sm text-gray-600">
                         <span class="font-semibold">股票代號 | Stock Symbol:</span> {{ result.symbol }}<br>
                         <span class="font-semibold">公司名稱 | Company Name:</span> {{ result.profile.name | default('N/A') }}<br>
-                        <span class="font-semibold">產業分類 | Industry:</span> {{ result.industry_zh }} ({{ result.industry_en }})<br>
-                        <span class="font-semibold">貨幣 | Currency:</span> {{ result.currency }}<br>
-                        <span class="font-semibold">目前價格 | Current Price:</span> {{ result.quote.current_price | default('N/A') }} {{ result.currency }}<br>
+                        <span class="font-semibold">產業分類 | Industry:</span> {{ result.industry_zh | default('未知') }} ({{ result.industry_en | default('Unknown') }})<br>
+                        <span class="font-semibold">目前價格 | Current Price:</span> {{ result.quote.current_price | default('N/A') }} TWD<br>
                         <span class="font-semibold">當日變化 | Daily Change:</span>
                         {% if result.quote.daily_change is defined and result.quote.daily_change is not none %}
                             {% if result.quote.daily_change > 0 %}
@@ -94,22 +75,14 @@
                         <span class="font-semibold">交易量 | Volume:</span> {{ result.quote.volume | default('N/A') | int }}
                     </p>
                 </div>
-                {% if result.is_taiwan %}
-                <div>
-                    <h4 class="text-base font-medium text-gray-800">最佳四點信號 | Best Four Point Signal</h4>
-                    <p class="text-sm text-gray-600">
-                        {{ result.bfp_signal | default('無明確信號 | No clear signal') }}
-                    </p>
-                </div>
-                {% endif %}
                 <div>
                     <h4 class="text-base font-medium text-gray-800">技術指標 | Technical Indicators</h4>
                     <p class="text-sm text-gray-600">
-                        <span class="font-semibold">50日移動平均線 | 50-Day MA:</span> {{ result.technical.ma50 | default('N/A') }} {{ result.currency }}<br>
+                        <span class="font-semibold">50日移動平均線 | 50-Day MA:</span> {{ result.technical.ma50 | default('N/A') }} TWD<br>
                         <span class="font-semibold">相對強弱指數 | RSI:</span> {{ result.technical.rsi | default('N/A') }}<br>
                         <span class="font-semibold">MACD:</span> {{ result.technical.macd | default('N/A') }}<br>
-                        <span class="font-semibold">支撐位 | Support Level:</span> {{ result.technical.support | default('N/A') }} {{ result.currency }}<br>
-                        <span class="font-semibold">阻力位 | Resistance Level:</span> {{ result.technical.resistance | default('N/A') }} {{ result.currency }}<br>
+                        <span class="font-semibold">支撐位 | Support Level:</span> {{ result.technical.support | default('N/A') }} TWD<br>
+                        <span class="font-semibold">阻力位 | Resistance Level:</span> {{ result.technical.resistance | default('N/A') }} TWD<br>
                         <span class="font-semibold">交易量 | Volume:</span> {{ result.technical.volume | default('N/A') | int }}
                     </p>
                 </div>
@@ -186,19 +159,42 @@
             <div class="space-y-4">
                 {% for item in result.news %}
                 <div class="border-b border-gray-200 pb-2">
-                    <p class="text-sm font-medium text-gray-800">{{ item.headline | default('N/A') }}</p>
-                    <p class="text-xs text-gray-600">{{ item.datetime | default('未知時間 | Unknown time') }}</p>
+                    <p class="text-sm font-medium text-gray-800">{{ item.title | default('N/A') }}</p>
+                    <p class="text-xs text-gray-600">Source: {{ item.source | default('Unknown') }} | Published: {{ item.published_at | default('Unknown time') }}</p>
                     <a href="{{ item.url | default('#') }}" target="_blank" class="text-sm text-indigo-600 hover:underline">查看詳情 | View Details</a>
                 </div>
                 {% endfor %}
             </div>
         </section>
-        {% endif %}
+        {% else %}
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
-            <h3 class="text-lg font-semibold text-gray-700 mb-4">📊 價格走勢圖 | Price Trend Chart</h3>
-            {{ result.plot_html | safe }}
+            <h3 class="text-lg font-semibold text-gray-700 mb-4">📰 近期新聞 | Recent News</h3>
+            <p class="text-sm text-gray-600">無相關新聞 | No related news available</p>
         </section>
         {% endif %}
+        <section class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-lg font-semibold text-gray-700 mb-4">選擇您的方案 | Select Your Plan</h2>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+                {% for tier in tiers %}
+                <div class="tier-btn">
+                    {% if current_tier_name == tier.name %}
+                    <button type="button" disabled
+                            class="w-full bg-gray-300 text-gray-600 px-4 py-2 rounded-md cursor-not-allowed text-center">
+                        {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests) (已選擇 | Selected)
+                    </button>
+                    {% else %}
+                    <form class="tierForm" method="POST" action="/create-checkout-session">
+                        <input type="hidden" name="tier" value="{{ tier.name }}">
+                        <button type="submit"
+                                class="w-full bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 transition duration-200 text-center">
+                            {{ tier.name }} {% if tier.price > 0 %}- ${{ tier.price }}/mo{% else %}- Free{% endif %} ({{ tier.limit }} Requests)
+                        </button>
+                    </form>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </section>
         <section class="bg-white rounded-lg shadow-md p-6 mb-6">
             <h2 class="text-lg font-semibold text-gray-700 mb-4">重置請求計數 | Reset Request Count</h2>
             <form class="reset-form" method="POST" action="/reset" class="flex flex-col sm:flex-row gap-4">
@@ -216,6 +212,7 @@
                 </button>
             </form>
         </section>
+        {% endif %}
     </main>
     <footer class="bg-gray-800 text-white py-6">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
