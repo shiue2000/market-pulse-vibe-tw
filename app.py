@@ -12,11 +12,9 @@ import pandas as pd
 import json
 from twstock import Stock as TwStock, realtime as twrealtime, codes as twcodes
 from twstock import BestFourPoint as TwBestFourPoint
-from bs4 import BeautifulSoup
 
 # ------------------ Load environment ------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "327ab6e463624447901ecee80b7dcb0b")
 SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
 # Stripe keys
 STRIPE_TEST_SECRET_KEY = os.getenv("STRIPE_TEST_SECRET_KEY")
@@ -34,8 +32,6 @@ STRIPE_PRICE_IDS = {
 }
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY not set in environment variables")
-if not NEWSAPI_KEY:
-    logger.warning("⚠️ NEWSAPI_KEY not set; news fetching may be limited")
 # Set Stripe keys
 if STRIPE_MODE == "live":
     STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
@@ -148,7 +144,7 @@ def get_historical_data(symbol):
             return pd.DataFrame(), {}
         stock = TwStock(symbol)
         current_year = datetime.datetime.now().year
-        stock.fetch_from(current_year - 1, 1)  # Fetch data from January of last year to now
+        stock.fetch_from(current_year - 1, 1) # Fetch data from January of last year to now
         df = pd.DataFrame(stock.data)
         if df.empty:
             logger.warning(f"No historical data for symbol {symbol}")
@@ -194,103 +190,37 @@ def get_company_profile(symbol):
         logger.error(f"Error fetching company profile for {symbol}: {e}")
         return {'name': 'N/A', 'group': '未知'}
 
-def get_twse_news(symbol, company_name, limit=5):
+def get_stock_news(symbol, company_name, limit=10):
     try:
-        url = "https://www.twse.com.tw/en/announcement/list"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        news = []
-        # Parse TWSE news (adjust selectors based on actual TWSE HTML structure)
-        for item in soup.select('table tr')[:limit * 2]:  # Fetch more to filter relevant
-            title_elem = item.select_one('td:nth-child(2) a')
-            date_elem = item.select_one('td:nth-child(1)')
-            if title_elem and date_elem:
-                title = title_elem.text.strip()
-                # Filter for company_name or symbol
-                if company_name in title or symbol in title:
-                    news.append({
-                        'title': title,
-                        'url': 'https://www.twse.com.tw' + title_elem.get('href', '#'),
-                        'published_at': date_elem.text.strip(),
-                        'source': 'Taiwan Stock Exchange'
-                    })
-        logger.info(f"Fetched {len(news)} TWSE news articles for {symbol}: {[article['title'] for article in news]}")
-        return news[:limit]
+        from_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+        prompt = f"""
+        Fetch the top {limit} most relevant news articles about the company {company_name} (stock symbol: {symbol}) from the past 30 days. 
+        Return the results in JSON format with the following structure for each article:
+        {{
+            "title": "article title",
+            "url": "article URL",
+            "published_at": "publication date in YYYY-MM-DD format",
+            "source": "source name"
+        }}
+        Ensure the articles are in English or Chinese and are directly related to the company or stock.
+        """
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a financial news assistant capable of fetching and summarizing recent news articles. Provide accurate and relevant news data in JSON format."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.5,
+            response_format={"type": "json_object"}
+        )
+        news_data = json.loads(response['choices'][0]['message']['content'])
+        news = news_data.get('articles', [])[:limit]
+        logger.info(f"Fetched {len(news)} OpenAI news articles for {symbol}: {[article['title'] for article in news]}")
+        return news
     except Exception as e:
-        logger.error(f"Error fetching TWSE news for {symbol}: {e}")
+        logger.error(f"Error fetching OpenAI news for {symbol}: {e}")
         return []
-
-def get_stock_news(symbol, company_name, limit=5):
-    news = []
-    if NEWSAPI_KEY:
-        try:
-            # Primary query with exact company name and symbol
-            query = f"\"{company_name}\" OR \"{symbol}\""
-            from_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
-            params = {
-                'q': query,
-                'from': from_date,
-                'sortBy': 'relevancy',
-                'language': 'en',
-                'apiKey': NEWSAPI_KEY
-            }
-            logger.info(f"Sending NewsAPI query: {query} from {from_date}")
-            response = requests.get("https://newsapi.org/v2/everything", params=params)
-            response.raise_for_status()
-            data = response.json()
-            logger.info(f"NewsAPI response status: {data.get('status')} | Total results: {data.get('totalResults', 0)}")
-            if data.get('status') == 'ok':
-                articles = data.get('articles', [])[:limit]
-                news = [
-                    {
-                        'title': article.get('title', 'N/A'),
-                        'url': article.get('url', '#'),
-                        'published_at': article.get('publishedAt', 'N/A'),
-                        'source': article.get('source', {}).get('name', 'Unknown')
-                    }
-                    for article in articles
-                ]
-                logger.info(f"Fetched {len(news)} NewsAPI articles for {symbol}: {[article['title'] for article in news]}")
-            else:
-                logger.warning(f"NewsAPI error: {data.get('message', 'Unknown error')}")
-        except Exception as e:
-            logger.error(f"Error fetching NewsAPI news for {symbol}: {e}")
-    if not news:
-        logger.info(f"No NewsAPI results for {symbol}; falling back to TWSE")
-        news = get_twse_news(symbol, company_name, limit)
-    if not news:
-        logger.info(f"No TWSE results for {symbol}; trying broader NewsAPI query")
-        try:
-            params = {
-                'q': f"{symbol} stock",
-                'from': (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y-%m-%d'),
-                'sortBy': 'relevancy',
-                'language': 'en',
-                'apiKey': NEWSAPI_KEY
-            }
-            logger.info(f"Sending fallback NewsAPI query: {params['q']}")
-            response = requests.get("https://newsapi.org/v2/everything", params=params)
-            response.raise_for_status()
-            data = response.json()
-            if data.get('status') == 'ok':
-                articles = data.get('articles', [])[:limit]
-                news = [
-                    {
-                        'title': article.get('title', 'N/A'),
-                        'url': article.get('url', '#'),
-                        'published_at': article.get('publishedAt', 'N/A'),
-                        'source': article.get('source', {}).get('name', 'Unknown')
-                    }
-                    for article in articles
-                ]
-                logger.info(f"Fallback query fetched {len(news)} NewsAPI articles for {symbol}: {[article['title'] for article in news]}")
-        except Exception as e:
-            logger.error(f"Error fetching fallback NewsAPI news for {symbol}: {e}")
-    return news
 
 def calculate_rsi(series, period=14):
     delta = series.diff(1)
@@ -357,10 +287,10 @@ def index():
         try:
             session["request_count"] = request_count + 1
             quote = get_quote(symbol)
-            metrics = {}  # Skip, or use custom calculation if needed
+            metrics = {} # Skip, or use custom calculation if needed
             profile = get_company_profile(symbol)
             company_name = profile.get('name', 'Unknown')
-            news = get_stock_news(symbol, company_name)  # Fetch news
+            news = get_stock_news(symbol, company_name) # Fetch news
             industry_zh = profile.get('group', '未知')
             industry_en = next((en for en, zh in industry_mapping.items() if zh == industry_zh), "Unknown")
             df, technical = get_historical_data(symbol)
@@ -368,7 +298,7 @@ def index():
             bfp_signal = "無明確信號 / No clear signal"
             try:
                 stock = TwStock(symbol)
-                stock.fetch_31()  # Fetch recent data for BestFourPoint analysis
+                stock.fetch_31() # Fetch recent data for BestFourPoint analysis
                 bfp = TwBestFourPoint(stock)
                 best = bfp.best_four_point()
                 if best:
