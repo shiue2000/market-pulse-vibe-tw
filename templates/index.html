@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" = "width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>📊 股票分析平台 (台股) | Taiwan Stock Analysis Platform</title>
     <script src="https://js.stripe.com/v3/"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -122,7 +122,7 @@
                 <div>
                     <h4 class="text-base font-medium text-gray-800">總結 | Summary</h4>
                     <p class="text-sm text-gray-600">
-                        {{ result.gpt_analysis.summary | default('請審慎評估技術指標後進行投資決策。 | Please please carefully evaluate technical indicators before making investment decisions.') | safe }}
+                        {{ result.gpt_analysis.summary | default('請審慎評估技術指標後進行投資決策。 | Please carefully evaluate technical indicators before making investment decisions.') | safe }}
                     </p>
                 </div>
                 <p class="text-xs text-gray-500 mt-4">*以上分析僅供參考，投資有風險 | The above analysis is for reference only; investing involves risks.*</p>
@@ -170,8 +170,7 @@
             </div>
             <div id="newsContent" class="space-y-4">
                 {% if result.news %}
-                <p class="text-xs text-gray-500">顯示最多9條新聞 | Showing up to 9 news items</p>
-                {% for item in result.news | slice(0, 9) %}
+                {% for item in result.news %}
                 <div class="border-b border-gray-200 pb-2 hover:bg-gray-50 transition duration-150">
                     <p class="text-sm font-medium text-gray-800 truncate">{{ item.title | default('N/A') }}</p>
                     <p class="text-xs text-gray-600">Source: {{ item.source | default('Unknown') }} | Published: {{ item.published_at | default('Unknown time') }}</p>
@@ -229,6 +228,7 @@
     <footer class="bg-gray-800 text-white py-6">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
             <p class="text-sm">© 2025 股票分析平台 | Stock Analysis Platform. All rights reserved.</p>
+            <p class="text-xs mt-2">如有問題，請聯繫我們 | Report issues at <a href="mailto:support@stockplatform.com" class="text-indigo-300 hover:underline">support@stockplatform.com</a></p>
         </div>
     </footer>
     <script>
@@ -248,6 +248,13 @@
             btn.disabled = true;
             document.getElementById("submitText").textContent = "處理中... | Processing...";
             document.getElementById("loadingSpinner").classList.remove("hidden");
+            // Show news loading state
+            const newsLoading = document.getElementById("newsLoading");
+            const newsContent = document.getElementById("newsContent");
+            if (newsLoading && newsContent) {
+                newsLoading.classList.remove("hidden");
+                newsContent.classList.add("hidden");
+            }
             setTimeout(() => this.submit(), 100);
         });
         document.querySelectorAll('.tierForm').forEach(form => {
@@ -293,7 +300,15 @@
                     document.getElementById("resetText").textContent = originalText;
                     document.getElementById("resetSpinner").classList.add("hidden");
                 });
-            });
+        });
+        // Hide news loading state on page load if no submission
+        window.addEventListener('load', () => {
+            const newsLoading = document.getElementById("newsLoading");
+            const newsContent = document.getElementById("newsContent");
+            if (newsLoading && newsContent) {
+                newsLoading.classList.add("hidden");
+                newsContent.classList.remove("hidden");
+            }
         });
     </script>
 </body>
