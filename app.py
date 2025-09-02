@@ -35,7 +35,7 @@ STRIPE_PRICE_IDS = {
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY not set in environment variables")
 if not NEWSAPI_KEY:
-    logger.warning("⚠️ NEWSAPI_KEY not set; news fetching may be limited")
+    logging.warning("⚠️ NEWSAPI_KEY not set; news fetching may be limited")
 # Set Stripe keys
 if STRIPE_MODE == "live":
     STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
@@ -104,9 +104,24 @@ PRICING_TIERS = [
 def validate_price_id(price_id, tier_name):
     return bool(price_id)
 
+def normalize_symbol(symbol):
+    """Normalize stock symbol by removing .tw or .two suffix."""
+    return symbol.replace('.tw', '').replace('.two', '').strip().upper()
+
+def is_valid_symbol(symbol):
+    """Check if the symbol exists in twstock codes (TWSE or TPEx)."""
+    return symbol in twcodes
+
+def get_market_type(symbol):
+    """Determine if the symbol is TWSE or TPEx based on twstock codes."""
+    if symbol in twcodes:
+        return 'TWSE' if twcodes[symbol].market == '上市' else 'TPEx'
+    return 'Unknown'
+
 def get_quote(symbol):
     try:
-        if symbol not in twcodes:
+        symbol = normalize_symbol(symbol)
+        if not is_valid_symbol(symbol):
             logger.warning(f"Symbol {symbol} not found in twcodes")
             return {}
         data = twrealtime.get(symbol)
@@ -143,17 +158,22 @@ def get_quote(symbol):
 
 def get_historical_data(symbol):
     try:
-        if symbol not in twcodes:
+        symbol = normalize_symbol(symbol)
+        if not is_valid_symbol(symbol):
             logger.warning(f"Symbol {symbol} not found in twcodes")
             return pd.DataFrame(), {}
         stock = TwStock(symbol)
         current_year = datetime.datetime.now().year
-        stock.fetch_from(current_year - 1, 1)  # Fetch data from January of last year to now
+        stock.fetch_from(current_year - 1, 1)  # Fetch data from January of last year
         df = pd.DataFrame(stock.data)
         if df.empty:
             logger.warning(f"No historical data for symbol {symbol}")
             return pd.DataFrame(), {}
-        df = df.rename(columns={'date': 'Date', 'capacity': 'Volume', 'turnover': 'Turnover', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'change': 'Change', 'transaction': 'Transaction'})
+        df = df.rename(columns={
+            'date': 'Date', 'capacity': 'Volume', 'turnover': 'Turnover',
+            'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close',
+            'change': 'Change', 'transaction': 'Transaction'
+        })
         df.set_index('Date', inplace=True)
         technical = {}
         if not df.empty:
@@ -182,53 +202,56 @@ def get_historical_data(symbol):
 
 def get_company_profile(symbol):
     try:
-        if symbol not in twcodes:
+        symbol = normalize_symbol(symbol)
+        if not is_valid_symbol(symbol):
             logger.warning(f"Symbol {symbol} not found in twcodes")
-            return {'name': 'N/A', 'group': '未知'}
+            return {'name': 'N/A', 'group': '未知', 'market': 'Unknown'}
         code_info = twcodes[symbol]
         return {
             'name': code_info.name,
-            'group': code_info.group
+            'group': code_info.group,
+            'market': 'TWSE' if code_info.market == '上市' else 'TPEx'
         }
     except Exception as e:
         logger.error(f"Error fetching company profile for {symbol}: {e}")
-        return {'name': 'N/A', 'group': '未知'}
+        return {'name': 'N/A', 'group': '未知', 'market': 'Unknown'}
 
-def get_twse_news(symbol, company_name, limit=5):
+def get_twse_news(symbol, company_name, limit=5, market='TWSE'):
     try:
-        url = "https://www.twse.com.tw/en/announcement/list"
+        base_url = "https://www.twse.com.tw/en/announcement/list" if market == 'TWSE' else "https://www.tpex.org.tw/web/regular_emerging/corporateInfo/regular_emerging_news.php?l=en"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(base_url, headers=headers, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         news = []
-        # Parse TWSE news (adjust selectors based on actual TWSE HTML structure)
-        for item in soup.select('table tr')[:limit * 2]:  # Fetch more to filter relevant
-            title_elem = item.select_one('td:nth-child(2) a')
+        selector = 'table tr' if market == 'TWSE' else '.news-table tr'  # Adjust based on TPEx HTML structure
+        for item in soup.select(selector)[:limit * 2]:
+            title_elem = item.select_one('td:nth-child(2) a') if market == 'TWSE' else item.select_one('td:nth-child(3) a')
             date_elem = item.select_one('td:nth-child(1)')
             if title_elem and date_elem:
                 title = title_elem.text.strip()
-                # Filter for company_name or symbol
                 if company_name in title or symbol in title:
                     news.append({
                         'title': title,
-                        'url': 'https://www.twse.com.tw' + title_elem.get('href', '#'),
+                        'url': ('https://www.twse.com.tw' if market == 'TWSE' else 'https://www.tpex.org.tw') + title_elem.get('href', '#'),
                         'published_at': date_elem.text.strip(),
-                        'source': 'Taiwan Stock Exchange'
+                        'source': 'Taiwan Stock Exchange' if market == 'TWSE' else 'Taipei Exchange'
                     })
-        logger.info(f"Fetched {len(news)} TWSE news articles for {symbol}: {[article['title'] for article in news]}")
+        logger.info(f"Fetched {len(news)} {market} news articles for {symbol}: {[article['title'] for article in news]}")
         return news[:limit]
     except Exception as e:
-        logger.error(f"Error fetching TWSE news for {symbol}: {e}")
+        logger.error(f"Error fetching {market} news for {symbol}: {e}")
         return []
 
 def get_stock_news(symbol, company_name, limit=5):
+    symbol = normalize_symbol(symbol)
+    profile = get_company_profile(symbol)
+    market = profile.get('market', 'Unknown')
     news = []
     if NEWSAPI_KEY:
         try:
-            # Primary query with exact company name and symbol
             query = f"\"{company_name}\" OR \"{symbol}\""
             from_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
             params = {
@@ -255,15 +278,13 @@ def get_stock_news(symbol, company_name, limit=5):
                     for article in articles
                 ]
                 logger.info(f"Fetched {len(news)} NewsAPI articles for {symbol}: {[article['title'] for article in news]}")
-            else:
-                logger.warning(f"NewsAPI error: {data.get('message', 'Unknown error')}")
         except Exception as e:
             logger.error(f"Error fetching NewsAPI news for {symbol}: {e}")
     if not news:
-        logger.info(f"No NewsAPI results for {symbol}; falling back to TWSE")
-        news = get_twse_news(symbol, company_name, limit)
+        logger.info(f"No NewsAPI results for {symbol}; falling back to {market} news")
+        news = get_twse_news(symbol, company_name, limit, market=market)
     if not news:
-        logger.info(f"No TWSE results for {symbol}; trying broader NewsAPI query")
+        logger.info(f"No {market} results for {symbol}; trying broader NewsAPI query")
         try:
             params = {
                 'q': f"{symbol} stock",
@@ -299,6 +320,7 @@ def calculate_rsi(series, period=14):
     avg_gain = gain.rolling(window=period, min_periods=1).mean()
     avg_loss = loss.rolling(window=period, min_periods=1).mean()
     rs = avg_gain / avg_loss
+    rs = rs.replace([float('inf'), -float('inf')], 0)  # Handle division by zero
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]
 
@@ -344,10 +366,11 @@ def index():
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
-        if symbol not in twcodes:
+        normalized_symbol = normalize_symbol(symbol)
+        if not is_valid_symbol(normalized_symbol):
             result = {
-                "error": f"無效的股票代號: {symbol} / Invalid stock symbol: {symbol}",
-                "profile": {'name': 'N/A', 'group': '未知'},
+                "error": f"無效的股票代號: {symbol} / Invalid stock symbol: {symbol} (not found in TWSE or TPEx)",
+                "profile": {'name': 'N/A', 'group': '未知', 'market': 'Unknown'},
                 "news": []
             }
             return render_template("index.html", result=result, symbol_input=symbol,
@@ -357,18 +380,19 @@ def index():
         try:
             session["request_count"] = request_count + 1
             quote = get_quote(symbol)
-            metrics = {}  # Skip, or use custom calculation if needed
+            metrics = {}  # Skip, or implement custom calculations for TWSE/TPEx
             profile = get_company_profile(symbol)
             company_name = profile.get('name', 'Unknown')
-            news = get_stock_news(symbol, company_name)  # Fetch news
+            market = profile.get('market', 'Unknown')
+            news = get_stock_news(symbol, company_name)
             industry_zh = profile.get('group', '未知')
             industry_en = next((en for en, zh in industry_mapping.items() if zh == industry_zh), "Unknown")
             df, technical = get_historical_data(symbol)
-            plot_html = get_plot_html(df, symbol)
+            plot_html = get_plot_html(df, normalized_symbol)
             bfp_signal = "無明確信號 / No clear signal"
             try:
-                stock = TwStock(symbol)
-                stock.fetch_31()  # Fetch recent data for BestFourPoint analysis
+                stock = TwStock(normalized_symbol)
+                stock.fetch_31()
                 bfp = TwBestFourPoint(stock)
                 best = bfp.best_four_point()
                 if best:
@@ -376,7 +400,7 @@ def index():
             except Exception as e:
                 logger.error(f"Error in BestFourPoint analysis for {symbol}: {e}")
             technical_str = ", ".join(f"{k.upper()}: {v}" for k, v in technical.items() if v != 'N/A')
-            prompt = f"請根據以下資訊產出中英文雙語股票分析: 股票代號: {symbol}, 目前價格: {quote.get('current_price', 'N/A')}, 產業分類: {industry_zh} ({industry_en}), 財務指標: {metrics}, 技術指標: {technical_str}, 最佳四點信號: {bfp_signal}. 請提供買入/賣出/持有建議."
+            prompt = f"請根據以下資訊產出中英文雙語股票分析: 股票代號: {symbol} ({market}), 目前價格: {quote.get('current_price', 'N/A')}, 產業分類: {industry_zh} ({industry_en}), 財務指標: {metrics}, 技術指標: {technical_str}, 最佳四點信號: {bfp_signal}. 請提供買入/賣出/持有建議."
             chat_response = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -404,7 +428,7 @@ def index():
         except Exception as e:
             result = {
                 "error": f"資料讀取錯誤: {e} / Data retrieval error: {e}",
-                "profile": {'name': 'N/A', 'group': '未知'},
+                "profile": {'name': 'N/A', 'group': '未知', 'market': 'Unknown'},
                 "news": []
             }
             logger.error(f"Processing error for symbol {symbol}: {e}")
