@@ -1,3 +1,4 @@
+```python
 # -*- coding: utf-8 -*-
 import datetime
 import requests
@@ -15,7 +16,7 @@ from twstock import BestFourPoint as TwBestFourPoint
 
 # ------------------ Load environment ------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "327ab6e463624447901ecee80b7dcb0b")  # Fallback to provided key
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "327ab6e463624447901ecee80b7dcb0b")
 SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
 # Stripe keys
 STRIPE_TEST_SECRET_KEY = os.getenv("STRIPE_TEST_SECRET_KEY")
@@ -198,20 +199,22 @@ def get_stock_news(symbol, company_name, limit=5):
         logger.warning("NewsAPI key missing; skipping news fetch")
         return []
     try:
-        # Use company name and symbol for search
-        query = f"{company_name} OR {symbol} stock"
+        # Use company name primarily for more specific results
+        query = f"\"{company_name}\" OR \"{symbol}\""
         from_date = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
         params = {
             'q': query,
             'from': from_date,
-            'sortBy': 'publishedAt',
+            'sortBy': 'relevancy',  # Use relevancy to prioritize specific matches
             'sources': 'reuters,bloomberg,bbc-news',  # Credible sources
-            'language': 'en',  # English for broader coverage; adjust for TW-specific if needed
+            'language': 'en',  # English for broader coverage
             'apiKey': NEWSAPI_KEY
         }
+        logger.info(f"Sending NewsAPI query: {query} from {from_date}")
         response = requests.get("https://newsapi.org/v2/everything", params=params)
         response.raise_for_status()
         data = response.json()
+        logger.info(f"NewsAPI response status: {data.get('status')} | Total results: {data.get('totalResults', 0)}")
         if data.get('status') != 'ok':
             logger.warning(f"NewsAPI error: {data.get('message', 'Unknown error')}")
             return []
@@ -225,7 +228,26 @@ def get_stock_news(symbol, company_name, limit=5):
             }
             for article in articles
         ]
-        logger.info(f"Fetched {len(news)} news articles for {symbol}")
+        logger.info(f"Fetched {len(news)} news articles for {symbol}: {[article['title'] for article in news]}")
+        if not news:
+            logger.info(f"No relevant news found for {symbol}; trying broader query")
+            # Fallback to broader query if no results
+            params['q'] = f"{symbol} stock"
+            response = requests.get("https://newsapi.org/v2/everything", params=params)
+            response.raise_for_status()
+            data = response.json()
+            if data.get('status') == 'ok':
+                articles = data.get('articles', [])[:limit]
+                news = [
+                    {
+                        'title': article.get('title', 'N/A'),
+                        'url': article.get('url', '#'),
+                        'published_at': article.get('publishedAt', 'N/A'),
+                        'source': article.get('source', {}).get('name', 'Unknown')
+                    }
+                    for article in articles
+                ]
+                logger.info(f"Fallback query fetched {len(news)} news articles for {symbol}: {[article['title'] for article in news]}")
         return news
     except Exception as e:
         logger.error(f"Error fetching news for {symbol}: {e}")
@@ -337,7 +359,8 @@ def index():
                 "gpt_analysis": gpt_analysis,
                 "plot_html": plot_html,
                 "technical": technical,
-                "profile": profile
+                "profile": profile,
+                "bfp_signal": bfp_signal  # Include for potential template use
             }
         except Exception as e:
             result = {
@@ -419,4 +442,4 @@ def reset():
 # ------------------ Run App ------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=True)
-
+```
