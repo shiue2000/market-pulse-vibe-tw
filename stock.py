@@ -3,6 +3,7 @@
 import datetime
 import urllib.parse
 from collections import namedtuple
+import logging
 
 from twstock.proxy import get_proxies
 
@@ -18,11 +19,13 @@ try:
     from .codes import codes
 except ImportError as e:
     if e.name == "lxml":
-        # Fix #69
         raise e
     import analytics
     from codes import codes
 
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 TWSE_BASE_URL = "http://www.twse.com.tw/"
 TPEX_BASE_URL = "http://www.tpex.org.tw/"
@@ -41,7 +44,6 @@ DATATUPLE = namedtuple(
     ],
 )
 
-
 class BaseFetcher(object):
     def fetch(self, year, month, sid, retry):
         pass
@@ -56,7 +58,6 @@ class BaseFetcher(object):
     def purify(self, original_data):
         pass
 
-
 class TWSEFetcher(BaseFetcher):
     REPORT_URL = urllib.parse.urljoin(TWSE_BASE_URL, "exchangeReport/STOCK_DAY")
 
@@ -66,41 +67,39 @@ class TWSEFetcher(BaseFetcher):
     def fetch(self, year: int, month: int, sid: str, retry: int = 5):
         params = {"date": "%d%02d01" % (year, month), "stockNo": sid}
         for retry_i in range(retry):
-            r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies())
             try:
+                r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies(), timeout=15)
+                r.raise_for_status()
                 data = r.json()
-            except JSONDecodeError:
-                continue
-            else:
-                break
-        else:
-            # Fail in all retries
-            data = {"stat": "", "data": []}
-
-        if data["stat"] == "OK":
-            data["data"] = self.purify(data)
-        else:
-            data["data"] = []
-        return data
+                logger.debug(f"[TWSE Fetch] Response for {sid}: {data}")
+                if data["stat"] == "OK":
+                    data["data"] = self.purify(data)
+                    return data
+                logger.warning(f"[TWSE Fetch] Non-OK stat for {sid}: {data.get('stat')}")
+            except (JSONDecodeError, requests.RequestException) as e:
+                logger.warning(f"[TWSE Fetch Error] Attempt {retry_i + 1} for {sid}: {e}")
+                time.sleep(5)
+        logger.error(f"[TWSE Fetch Error] Failed to fetch data for {sid} after {retry} attempts")
+        return {"stat": "", "data": []}
 
     def _make_datatuple(self, data):
-        data[0] = datetime.datetime.strptime(self._convert_date(data[0]), "%Y/%m/%d")
-        data[1] = int(data[1].replace(",", ""))
-        data[2] = int(data[2].replace(",", ""))
-        data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
-        data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
-        data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
-        data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
-        # +/-/X表示漲/跌/不比價
-        data[7] = float(
-            0.0 if data[7].replace(",", "") == "X0.00" else data[7].replace(",", "")
-        )
-        data[8] = int(data[8].replace(",", ""))
-        return DATATUPLE(*data)
+        try:
+            data[0] = datetime.datetime.strptime(self._convert_date(data[0]), "%Y/%m/%d")
+            data[1] = int(data[1].replace(",", ""))
+            data[2] = int(data[2].replace(",", ""))
+            data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
+            data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
+            data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
+            data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
+            data[7] = float(0.0 if data[7].replace(",", "") == "X0.00" else data[7].replace(",", ""))
+            data[8] = int(data[8].replace(",", ""))
+            return DATATUPLE(*data)
+        except Exception as e:
+            logger.error(f"[TWSE Parse Error] Failed to parse data: {e}")
+            return None
 
     def purify(self, original_data):
-        return [self._make_datatuple(d) for d in original_data["data"]]
-
+        return [d for d in (self._make_datatuple(d) for d in original_data["data"]) if d is not None]
 
 class TPEXFetcher(BaseFetcher):
     REPORT_URL = urllib.parse.urljoin(
@@ -113,48 +112,54 @@ class TPEXFetcher(BaseFetcher):
     def fetch(self, year: int, month: int, sid: str, retry: int = 5):
         params = {"d": "%d/%d" % (year - 1911, month), "stkno": sid}
         for retry_i in range(retry):
-            r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies())
             try:
+                r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies(), timeout=15)
+                r.raise_for_status()
                 data = r.json()
-            except JSONDecodeError:
-                continue
-            else:
-                break
-        else:
-            # Fail in all retries
-            data = {"aaData": []}
-
-        data["data"] = []
-        if data["aaData"]:
-            data["data"] = self.purify(data)
-        return data
+                logger.debug(f"[TPEX Fetch] Response for {sid}: {data}")
+                data["data"] = self.purify(data) if data.get("aaData") else []
+                return data
+            except (JSONDecodeError, requests.RequestException) as e:
+                logger.warning(f"[TPEX Fetch Error] Attempt {retry_i + 1} for {sid}: {e}")
+                time.sleep(5)
+        logger.error(f"[TPEX Fetch Error] Failed to fetch data for {sid} after {retry} attempts")
+        return {"aaData": [], "data": []}
 
     def _convert_date(self, date):
         """Convert '106/05/01' to '2017/05/01'"""
         return "/".join([str(int(date.split("/")[0]) + 1911)] + date.split("/")[1:])
 
     def _make_datatuple(self, data):
-        data[0] = datetime.datetime.strptime(
-            self._convert_date(data[0].replace("＊", "")), "%Y/%m/%d"
-        )
-        data[1] = int(data[1].replace(",", "")) * 1000
-        data[2] = int(data[2].replace(",", "")) * 1000
-        data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
-        data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
-        data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
-        data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
-        data[7] = float(data[7].replace(",", ""))
-        data[8] = int(data[8].replace(",", ""))
-        return DATATUPLE(*data)
+        try:
+            data[0] = datetime.datetime.strptime(
+                self._convert_date(data[0].replace("＊", "")), "%Y/%m/%d"
+            )
+            data[1] = int(data[1].replace(",", "")) * 1000
+            data[2] = int(data[2].replace(",", "")) * 1000
+            data[3] = None if data[3] == "--" else float(data[3].replace(",", ""))
+            data[4] = None if data[4] == "--" else float(data[4].replace(",", ""))
+            data[5] = None if data[5] == "--" else float(data[5].replace(",", ""))
+            data[6] = None if data[6] == "--" else float(data[6].replace(",", ""))
+            data[7] = float(data[7].replace(",", ""))
+            data[8] = int(data[8].replace(",", ""))
+            return DATATUPLE(*data)
+        except Exception as e:
+            logger.error(f"[TPEX Parse Error] Failed to parse data: {e}")
+            return None
 
     def purify(self, original_data):
-        return [self._make_datatuple(d) for d in original_data["aaData"]]
-
+        return [d for d in (self._make_datatuple(d) for d in original_data["aaData"]) if d is not None]
 
 class Stock(analytics.Analytics):
     def __init__(self, sid: str, initial_fetch: bool = True):
         self.sid = sid
-        self.fetcher = TWSEFetcher() if codes[sid].market == "上市" else TPEXFetcher()
+        try:
+            market = codes[sid].market if hasattr(codes[sid], 'market') else codes[sid].get('market', '上市')
+            logger.debug(f"[Stock Init] Market for {sid}: {market}")
+            self.fetcher = TWSEFetcher() if market == "上市" else TPEXFetcher()
+        except Exception as e:
+            logger.error(f"[Stock Init Error] Failed to determine market for {sid}: {e}", exc_info=True)
+            raise
         self.raw_data = []
         self.data = []
 
@@ -171,8 +176,14 @@ class Stock(analytics.Analytics):
 
     def fetch(self, year: int, month: int):
         """Fetch year month data"""
-        self.raw_data = [self.fetcher.fetch(year, month, self.sid)]
-        self.data = self.raw_data[0]["data"]
+        try:
+            self.raw_data = [self.fetcher.fetch(year, month, self.sid)]
+            self.data = self.raw_data[0]["data"]
+            logger.info(f"[Stock Fetch] Successfully fetched data for {self.sid}")
+        except Exception as e:
+            logger.error(f"[Stock Fetch Error] Failed for {self.sid}: {e}", exc_info=True)
+            self.raw_data = [{"data": []}]
+            self.data = []
         return self.data
 
     def fetch_from(self, year: int, month: int):
