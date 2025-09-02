@@ -13,6 +13,7 @@ import pandas as pd
 import json, os
 import urllib.parse
 from collections import namedtuple
+from itertools import cycle
 try:
     from json.decoder import JSONDecodeError
 except ImportError:
@@ -241,6 +242,7 @@ class TWSEFetcher(BaseFetcher):
                 r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies(), timeout=10)
                 r.raise_for_status()
                 data = r.json()
+                logger.info(f"[TWSE Fetch] Response for {sid}: {data.get('stat', 'No stat')}")
                 if data.get("stat") == "OK":
                     data["data"] = self.purify(data)
                     return data
@@ -279,6 +281,7 @@ class TPEXFetcher(BaseFetcher):
                 r = requests.get(self.REPORT_URL, params=params, proxies=get_proxies(), timeout=10)
                 r.raise_for_status()
                 data = r.json()
+                logger.info(f"[TPEX Fetch] Response for {sid}: {data.get('stat', 'No stat')}")
                 data["data"] = self.purify(data) if data.get("aaData") else []
                 return data
             except (JSONDecodeError, requests.RequestException) as e:
@@ -444,8 +447,9 @@ def get_raw(stocks):
     try:
         r = req.get(SESSION_URL, proxies=get_proxies(), timeout=10)
         r.raise_for_status()
+        logger.info(f"[TWSE Session] Successfully initialized session for {stocks}")
     except requests.RequestException as e:
-        logger.error(f"[TWSE Session Error] Failed to initialize session: {e}")
+        logger.error(f"[TWSE Session Error] Failed to initialize session for {stocks}: {e}")
         return {"rtmessage": "Session initialization failed", "rtcode": "5002"}
     data = {"rtmessage": "Empty Query.", "rtcode": "5001"}
     for prefix in ['tse', 'otc']:
@@ -454,6 +458,7 @@ def get_raw(stocks):
             r = req.get(STOCKINFO_URL.format(stock_id=stock_id, time=int(time.time()) * 1000), timeout=10)
             r.raise_for_status()
             data = r.json()
+            logger.info(f"[TWSE Realtime] Response for {prefix}_{stocks}.tw: {data.get('rtcode', 'No rtcode')}")
             if "msgArray" in data and len(data["msgArray"]) > 0:
                 break
         except (JSONDecodeError, requests.RequestException) as e:
@@ -464,6 +469,7 @@ def get_raw(stocks):
 def get(stocks, retry=3):
     for attempt in range(retry):
         data = get_raw(stocks)
+        logger.debug(f"[Realtime Attempt {attempt + 1}] Raw data for {stocks}: {data}")
         if data.get("rtcode") == "5000" and "msgArray" in data and len(data["msgArray"]) > 0:
             if isinstance(stocks, list):
                 result = {d["c"]: _format_stock_info(d) for d in data["msgArray"]}
@@ -506,7 +512,7 @@ if not STRIPE_SECRET_KEY or not STRIPE_PUBLISHABLE_KEY:
     raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in .env")
 stripe.api_key = STRIPE_SECRET_KEY
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -569,6 +575,7 @@ def get_finnhub_json(endpoint, params):
         try:
             r = requests.get(url, params=params, timeout=10)
             r.raise_for_status()
+            logger.debug(f"[Finnhub] Response for {endpoint} with {params}: {r.json()}")
             return r.json()
         except Exception as e:
             logger.warning(f"[Finnhub Error] Attempt {attempt + 1} for {endpoint}: {e}")
@@ -577,14 +584,17 @@ def get_finnhub_json(endpoint, params):
     return {}
 
 def get_quote(symbol, is_taiwan=False):
+    logger.debug(f"Fetching quote for {symbol}, is_taiwan={is_taiwan}")
     if is_taiwan:
         try:
             data = get(symbol, retry=5)
+            logger.debug(f"TWSE/TPEX response for {symbol}: {data}")
             if not data.get('success') or 'realtime' not in data:
                 logger.error(f"Taiwan stock data fetch failed for {symbol}: {data.get('rtmessage', 'No data')}")
                 # Fallback to Finnhub
                 logger.info(f"Attempting Finnhub fallback for {symbol}.TW")
                 data = get_finnhub_json("quote", {"symbol": f"{symbol}.TW"})
+                logger.debug(f"Finnhub fallback response for {symbol}.TW: {data}")
                 if not data or 'c' not in data:
                     logger.error(f"Finnhub fallback failed for {symbol}.TW: {data}")
                     return {}
@@ -609,6 +619,7 @@ def get_quote(symbol, is_taiwan=False):
                 'daily_change': round((float(current) - float(prev)) / float(prev) * 100, 4) if current and prev and float(prev) != 0 else 'N/A',
                 'volume': int(rt.get('accumulate_trade_volume', 0)) if rt.get('accumulate_trade_volume') and rt.get('accumulate_trade_volume') != '--' else 'N/A'
             }
+            logger.debug(f"Formatted quote for {symbol}: {quote}")
             return quote
         except Exception as e:
             logger.error(f"Error fetching Taiwan quote for {symbol}: {e}")
@@ -616,6 +627,7 @@ def get_quote(symbol, is_taiwan=False):
     else:
         try:
             data = get_finnhub_json("quote", {"symbol": symbol})
+            logger.debug(f"Finnhub quote response for {symbol}: {data}")
             if not data or 'c' not in data:
                 logger.error(f"Finnhub quote fetch failed for {symbol}: {data}")
                 return {}
@@ -637,6 +649,7 @@ def get_metrics(symbol, is_taiwan=False):
         if is_taiwan:
             symbol = f"{symbol}.TW"
         metrics = get_finnhub_json("stock/metric", {"symbol": symbol, "metric": "all"}).get("metric", {})
+        logger.debug(f"Metrics for {symbol}: {metrics}")
         if not metrics:
             logger.warning(f"No metrics data for {symbol}")
         return metrics
@@ -667,6 +680,7 @@ def filter_metrics(metrics):
                     filtered[new_key] = round(v, 4)
             except:
                 filtered[new_key] = str(v)
+    logger.debug(f"Filtered metrics: {filtered}")
     return filtered
 
 def get_recent_news(symbol, is_taiwan=False):
@@ -676,6 +690,7 @@ def get_recent_news(symbol, is_taiwan=False):
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         past = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
         news = get_finnhub_json("company-news", {"symbol": symbol, "from": past, "to": today})
+        logger.debug(f"News for {symbol}: {news}")
         if not isinstance(news, list):
             logger.warning(f"No news data for {symbol}")
             return []
@@ -695,6 +710,7 @@ def get_company_profile(symbol, is_taiwan=False):
         if is_taiwan:
             symbol = f"{symbol}.TW"
         profile = get_finnhub_json("stock/profile2", {"symbol": symbol})
+        logger.debug(f"Profile for {symbol}: {profile}")
         if not profile:
             logger.warning(f"No profile data for {symbol}")
         return profile
@@ -718,26 +734,43 @@ def calculate_rsi(series, period=14):
         return 'N/A'
 
 def get_historical_data(symbol, is_taiwan=False):
+    logger.debug(f"Fetching historical data for {symbol}, is_taiwan={is_taiwan}")
     try:
         if is_taiwan:
             stock = Stock(symbol)
             today = datetime.datetime.today()
             before = today - datetime.timedelta(days=365)
             stock.fetch_from(before.year, before.month)
+            logger.debug(f"Stock data for {symbol}: {stock.data}")
             if not stock.data:
                 logger.warning(f"No historical data for Taiwan stock {symbol}")
-                return pd.DataFrame(), {}
-            data_dict = {
-                'Date': stock.date,
-                'Open': stock.open,
-                'High': stock.high,
-                'Low': stock.low,
-                'Close': stock.close,
-                'Volume': stock.capacity
-            }
-            df = pd.DataFrame(data_dict)
-            df.set_index('Date', inplace=True)
-            df = df.dropna(subset=['Close'])
+                # Fallback to yfinance for Taiwan stocks
+                logger.info(f"Attempting yfinance fallback for {symbol}.TW")
+                df = pd.DataFrame()
+                for attempt in range(3):
+                    try:
+                        df = yf.download(f"{symbol}.TW", period="1y", progress=False)
+                        if not df.empty:
+                            break
+                        time.sleep(3)
+                    except Exception as e:
+                        logger.warning(f"[YF Historical Error] Attempt {attempt + 1} for {symbol}.TW: {e}")
+                        time.sleep(3)
+                if df.empty:
+                    logger.warning(f"No yfinance historical data for {symbol}.TW")
+                    return pd.DataFrame(), {}
+            else:
+                data_dict = {
+                    'Date': stock.date,
+                    'Open': stock.open,
+                    'High': stock.high,
+                    'Low': stock.low,
+                    'Close': stock.close,
+                    'Volume': stock.capacity
+                }
+                df = pd.DataFrame(data_dict)
+                df.set_index('Date', inplace=True)
+                df = df.dropna(subset=['Close'])
         else:
             df = pd.DataFrame()
             for attempt in range(3):
@@ -753,6 +786,7 @@ def get_historical_data(symbol, is_taiwan=False):
                 logger.warning(f"No historical data for {symbol}")
                 return pd.DataFrame(), {}
         
+        logger.debug(f"Historical data DataFrame for {symbol}: {df.head().to_dict()}")
         window_50 = min(50, len(df))
         ma50 = df['Close'].rolling(window=window_50).mean().iloc[-1] if len(df) >= 1 else 'N/A'
         rsi = calculate_rsi(df['Close'])
@@ -771,6 +805,7 @@ def get_historical_data(symbol, is_taiwan=False):
             'resistance': round(float(resistance), 2) if pd.notnull(resistance) else 'N/A',
             'volume': int(volume) if pd.notnull(volume) and volume != 'N/A' else 'N/A'
         }
+        logger.debug(f"Technical indicators for {symbol}: {technical}")
         return df, technical
     except Exception as e:
         logger.error(f"Error in get_historical_data for {symbol}: {e}")
@@ -779,6 +814,7 @@ def get_historical_data(symbol, is_taiwan=False):
 def get_plot_html(df, symbol, currency="TWD"):
     try:
         if df.empty or 'Close' not in df.columns:
+            logger.warning(f"No data for plot for {symbol}")
             return "<p class='text-danger'>📊 無法取得股價趨勢圖 / Unable to fetch price trend chart</p>"
         df_plot = df.tail(7)
         dates = df_plot.index.strftime('%Y-%m-%d').tolist()
@@ -808,16 +844,20 @@ def index():
     current_tier_name = current_tier["name"]
 
     if request.method == "POST":
+        logger.debug(f"Processing POST request with form data: {request.form}")
         if request_count >= current_limit:
             result["error"] = f"已達 {current_tier_name} 等級請求上限，請升級方案 / Request limit reached for {current_tier_name}, please upgrade your plan"
+            logger.warning(f"Request limit reached: {request_count}/{current_limit}")
             return render_template("index.html", result=result, symbol_input=symbol,
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
 
         symbol = request.form.get("symbol", "").strip().upper()
+        logger.debug(f"Received symbol: {symbol}")
         if not symbol:
             result["error"] = "請輸入股票代號 / Please enter a stock symbol"
+            logger.warning("No symbol provided in POST request")
             return render_template("index.html", result=result, symbol_input=symbol,
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
@@ -827,6 +867,7 @@ def index():
             session["request_count"] = request_count + 1
             is_taiwan = len(symbol) == 4 and symbol.isdigit()
             currency = "TWD" if is_taiwan else "USD"
+            logger.debug(f"Symbol {symbol} identified as {'Taiwan' if is_taiwan else 'Non-Taiwan'} stock, currency: {currency}")
 
             quote = get_quote(symbol, is_taiwan)
             if not quote or all(v == 'N/A' for v in quote.values()):
@@ -842,6 +883,7 @@ def index():
             profile = get_company_profile(symbol, is_taiwan)
             industry_en = profile.get("finnhubIndustry", "Unknown")
             industry_zh = industry_mapping.get(industry_en, "未知")
+            logger.debug(f"Profile industry: {industry_en} ({industry_zh})")
             df, technical = get_historical_data(symbol, is_taiwan)
             quote['volume'] = technical.get('volume', quote.get('volume', 'N/A'))
             plot_html = get_plot_html(df, symbol, currency)
@@ -855,6 +897,7 @@ def index():
                         best = bfp.best_four_point()
                         if best:
                             bfp_signal = f"買入信號: {best[1]} / Buy signal: {best[1]}" if best[0] else f"賣出信號: {best[1]} / Sell signal: {best[1]}"
+                        logger.debug(f"Best Four Point signal for {symbol}: {bfp_signal}")
                     else:
                         logger.warning(f"No stock data for BestFourPoint analysis for {symbol}")
                 except Exception as e:
@@ -872,6 +915,7 @@ def index():
                 f"最佳四點信號: {bfp_signal}. "
                 f"請提供買入/賣出/持有建議."
             )
+            logger.debug(f"OpenAI prompt: {prompt}")
             try:
                 chat_response = openai.ChatCompletion.create(
                     model="gpt-4o-mini",
@@ -894,6 +938,7 @@ def index():
                     response_format={"type": "json_object"}
                 )
                 gpt_analysis = json.loads(chat_response['choices'][0]['message']['content'])
+                logger.debug(f"OpenAI response: {gpt_analysis}")
             except Exception as e:
                 logger.error(f"OpenAI API error for {symbol}: {e}")
                 gpt_analysis = {
@@ -918,6 +963,7 @@ def index():
                 "currency": currency,
                 "bfp_signal": bfp_signal
             }
+            logger.debug(f"Final result for {symbol}: {result}")
         except Exception as e:
             result = {"error": f"無法取得 {symbol} 的股票資料，可能是API連線問題或資料解析錯誤 / Unable to fetch data for {symbol}: {str(e)}"}
             logger.error(f"Processing error for symbol {symbol}: {e}")
@@ -938,6 +984,7 @@ def index():
 
 @app.route("/create-checkout-session", methods=["POST"])
 def create_checkout_session():
+    logger.debug(f"Creating checkout session with form data: {request.form}")
     tier_name = request.form.get("tier")
     tier = next((t for t in PRICING_TIERS if t["name"] == tier_name), None)
     if not tier:
@@ -981,6 +1028,7 @@ def payment_success(tier_name):
 
 @app.route("/reset", methods=["POST"])
 def reset():
+    logger.debug(f"Reset request with form data: {request.form}")
     password = request.form.get("password")
     if password == "888888":
         session["request_count"] = 0
