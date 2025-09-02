@@ -7,22 +7,27 @@ import plotly.graph_objs as go
 import stripe
 from dotenv import load_dotenv
 import logging
+import time
+import yfinance as yf
 import pandas as pd
 import json, os
-from twstock import Stock, codes  # Import from twstock package
+
+# Import Taiwan stock modules
+from proxy import get_proxies
+from analytics import Analytics, BestFourPoint
+from stock import Stock, TWSEFetcher, TPEXFetcher, DATATUPLE
+from realtime import get, get_raw
 
 # ------------------ Load environment ------------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
-
 # Stripe keys
 STRIPE_TEST_SECRET_KEY = os.getenv("STRIPE_TEST_SECRET_KEY")
 STRIPE_TEST_PUBLISHABLE_KEY = os.getenv("STRIPE_TEST_PUBLISHABLE_KEY")
 STRIPE_LIVE_SECRET_KEY = os.getenv("STRIPE_LIVE_SECRET_KEY")
 STRIPE_LIVE_PUBLISHABLE_KEY = os.getenv("STRIPE_LIVE_PUBLISHABLE_KEY")
 STRIPE_MODE = os.getenv("STRIPE_MODE", "test").lower()
-
 # Stripe Price IDs
 STRIPE_PRICE_IDS = {
     "Free": os.getenv("STRIPE_PRICE_TIER0"),
@@ -31,10 +36,8 @@ STRIPE_PRICE_IDS = {
     "Tier 3": os.getenv("STRIPE_PRICE_TIER3"),
     "Tier 4": os.getenv("STRIPE_PRICE_TIER4"),
 }
-
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY not set in .env")
-
 # Set Stripe keys
 if STRIPE_MODE == "live":
     STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
@@ -42,14 +45,12 @@ if STRIPE_MODE == "live":
 else:
     STRIPE_SECRET_KEY = STRIPE_TEST_SECRET_KEY
     STRIPE_PUBLISHABLE_KEY = STRIPE_TEST_PUBLISHABLE_KEY
-
 if not STRIPE_SECRET_KEY or not STRIPE_PUBLISHABLE_KEY:
     raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in .env")
-
 stripe.api_key = STRIPE_SECRET_KEY
 
 # ------------------ Logger setup ------------------
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ------------------ Initialize Flask & OpenAI ------------------
@@ -58,13 +59,42 @@ app.secret_key = SECRET_KEY
 openai.api_key = OPENAI_API_KEY
 
 # ------------------ Stock app config ------------------
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+industry_mapping = {
+    "Technology": "科技業",
+    "Financial Services": "金融服務業",
+    "Healthcare": "醫療保健業",
+    "Consumer Cyclical": "非必需消費品業",
+    "Communication Services": "通訊服務業",
+    "Energy": "能源業",
+    "Industrials": "工業類股",
+    "Utilities": "公用事業",
+    "Real Estate": "房地產業",
+    "Materials": "原物料業",
+    "Consumer Defensive": "必需消費品業",
+    "Unknown": "未知"
+}
+IMPORTANT_METRICS = [
+    "peTTM", "pb", "roeTTM", "roaTTM", "grossMarginTTM",
+    "revenueGrowthTTMYoy", "epsGrowthTTMYoy", "debtToEquityAnnual"
+]
+METRIC_NAMES_ZH_EN = {
+    "pe_ratio": "本益比 (PE TTM)",
+    "pb_ratio": "股價淨值比 (PB)",
+    "roe_ttm": "股東權益報酬率 (ROE TTM)",
+    "roa_ttm": "資產報酬率 (ROA TTM)",
+    "gross_margin_ttm": "毛利率 (Gross Margin TTM)",
+    "revenue_growth": "營收成長率 (YoY)",
+    "eps_growth": "每股盈餘成長率 (EPS Growth YoY)",
+    "debt_to_equity": "負債權益比 (Debt to Equity Annual)"
+}
 QUOTE_FIELDS = {
     "current_price": ("即時股價", "Current Price"),
     "open": ("開盤價", "Open"),
     "high": ("最高價", "High"),
     "low": ("最低價", "Low"),
     "previous_close": ("前收盤價", "Previous Close"),
-    "daily_change": ("漲跌幅", "Change"),
+    "daily_change": ("漲跌幅(%)", "Change Percent"),
     "volume": ("交易量", "Volume")
 }
 
@@ -81,72 +111,226 @@ PRICING_TIERS = [
 def validate_price_id(price_id, tier_name):
     return bool(price_id)
 
-def get_stock_data(sid):
-    try:
-        stock = Stock(sid)
-        logger.debug(f"Fetching data for {sid}")
-        stock.fetch_31()  # Use modified fetch_31
-        logger.debug(f"Fetched data for {sid}: {len(stock.data)} records")
-        if not stock.data:
-            logger.error(f"No data returned for {sid}")
-            return None, None, None
-        # Convert to DataFrame for easier manipulation
-        df = pd.DataFrame({
-            'Date': stock.date,
-            'Open': stock.open,
-            'High': stock.high,
-            'Low': stock.low,
-            'Close': stock.close,
-            'Volume': stock.capacity,
-            'Change': stock.change
-        }).set_index('Date')
-        
-        # Calculate technical indicators
-        ma50 = df['Close'].rolling(window=50, min_periods=1).mean().iloc[-1]
-        support = df['Low'].tail(20).min()
-        resistance = df['High'].tail(20).max()
-        volume = df['Volume'].iloc[-1]
-        previous_close = df['Close'].shift(1).iloc[-1] if len(df) > 1 else None
-        
-        quote = {
-            'current_price': stock.close[-1] if stock.close else 'N/A',
-            'open': stock.open[-1] if stock.open else 'N/A',
-            'high': stock.high[-1] if stock.high else 'N/A',
-            'low': stock.low[-1] if stock.low else 'N/A',
-            'previous_close': previous_close if previous_close else 'N/A',
-            'daily_change': stock.change[-1] if stock.change else 'N/A',
-            'volume': volume if volume else 'N/A'
-        }
-        
-        technical = {
-            'ma50': round(ma50, 2) if pd.notnull(ma50) else 'N/A',
-            'support': round(support, 2) if pd.notnull(support) else 'N/A',
-            'resistance': round(resistance, 2) if pd.notnull(resistance) else 'N/A',
-            'volume': volume if volume else 'N/A'
-        }
-        
-        logger.debug(f"Stock data processed for {sid}: Quote={quote}, Technical={technical}")
-        return df, quote, technical
-    except Exception as e:
-        logger.error(f"Error fetching stock data for {sid}: {str(e)}", exc_info=True)
-        return None, None, None
+def get_finnhub_json(endpoint, params):
+    url = f"https://finnhub.io/api/v1/{endpoint}"
+    params["token"] = FINNHUB_API_KEY
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=5)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            logger.warning(f"[Finnhub Error] Attempt {attempt + 1} for {endpoint}: {e}")
+            time.sleep(2)
+    logger.error(f"[Finnhub Error] Failed to fetch {endpoint} after 3 attempts")
+    return {}
 
-def get_plot_html(df, sid):
-    if df is None or df.empty or 'Close' not in df.columns:
-        return "<p class='text-danger'>📊 無法取得股價趨勢圖</p>"
-    df_plot = df.tail(7)
-    dates = df_plot.index.strftime('%Y-%m-%d').tolist()
-    closes = df_plot['Close'].round(2).tolist()
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=dates, y=closes, mode='lines+markers', name='Close Price'))
-    fig.update_layout(
-        title=f"{sid} 最近7日收盤價 / 7-Day Closing Price Trend",
-        xaxis_title="日期 / Date",
-        yaxis_title="收盤價 (TWD)",
-        template="plotly_white",
-        height=400
-    )
-    return fig.to_html(full_html=False, include_plotlyjs='cdn', default_height="400px", default_width="100%")
+def get_quote(symbol, is_taiwan=False):
+    if is_taiwan:
+        try:
+            data = get(symbol)
+            if not data.get('success') or 'realtime' not in data:
+                logger.error(f"Taiwan stock data fetch failed for {symbol}: {data.get('rtmessage', 'No data')}")
+                return {}
+            rt = data['realtime']
+            current = rt['latest_trade_price'] if rt['latest_trade_price'] and rt['latest_trade_price'] != '--' else None
+            prev = rt.get('previous_close') if rt.get('previous_close') and rt.get('previous_close') != '--' else None
+            quote = {
+                'current_price': round(float(current), 4) if current else 'N/A',
+                'open': round(float(rt['open']), 4) if rt['open'] and rt['open'] != '--' else 'N/A',
+                'high': round(float(rt['high']), 4) if rt['high'] and rt['high'] != '--' else 'N/A',
+                'low': round(float(rt['low']), 4) if rt['low'] and rt['low'] != '--' else 'N/A',
+                'previous_close': round(float(prev), 4) if prev else 'N/A',
+                'daily_change': round((float(current) - float(prev)) / float(prev) * 100, 4) if current and prev and float(prev) != 0 else 'N/A',
+                'volume': int(rt.get('accumulate_trade_volume', 0)) if rt.get('accumulate_trade_volume') and rt.get('accumulate_trade_volume') != '--' else 'N/A'
+            }
+            return quote
+        except Exception as e:
+            logger.error(f"Error fetching Taiwan quote for {symbol}: {e}")
+            return {}
+    else:
+        try:
+            data = get_finnhub_json("quote", {"symbol": symbol})
+            if not data or 'c' not in data:
+                logger.error(f"Finnhub quote fetch failed for {symbol}: {data}")
+                return {}
+            return {
+                'current_price': round(data.get('c', 'N/A'), 4),
+                'open': round(data.get('o', 'N/A'), 4),
+                'high': round(data.get('h', 'N/A'), 4),
+                'low': round(data.get('l', 'N/A'), 4),
+                'previous_close': round(data.get('pc', 'N/A'), 4),
+                'daily_change': round(data.get('dp', 'N/A'), 4),
+                'volume': int(data.get('v', 'N/A')) if data.get('v') and data.get('v') != 'N/A' else 'N/A'
+            }
+        except Exception as e:
+            logger.error(f"Error fetching Finnhub quote for {symbol}: {e}")
+            return {}
+
+def get_metrics(symbol, is_taiwan=False):
+    try:
+        if is_taiwan:
+            symbol = f"{symbol}.TW"
+        metrics = get_finnhub_json("stock/metric", {"symbol": symbol, "metric": "all"}).get("metric", {})
+        if not metrics:
+            logger.warning(f"No metrics data for {symbol}")
+        return metrics
+    except Exception as e:
+        logger.error(f"Error fetching metrics for {symbol}: {e}")
+        return {}
+
+def filter_metrics(metrics):
+    filtered = {}
+    metric_map = {
+        "peTTM": "pe_ratio",
+        "pb": "pb_ratio",
+        "roeTTM": "roe_ttm",
+        "roaTTM": "roa_ttm",
+        "grossMarginTTM": "gross_margin_ttm",
+        "revenueGrowthTTMYoy": "revenue_growth",
+        "epsGrowthTTMYoy": "eps_growth",
+        "debtToEquityAnnual": "debt_to_equity"
+    }
+    for original_key, new_key in metric_map.items():
+        v = metrics.get(original_key)
+        if v is not None:
+            try:
+                v = float(v)
+                if "growth" in new_key or "margin" in new_key or "roe" in new_key or "roa" in new_key:
+                    filtered[new_key] = f"{v:.2f}%"
+                else:
+                    filtered[new_key] = round(v, 4)
+            except:
+                filtered[new_key] = str(v)
+    return filtered
+
+def get_recent_news(symbol, is_taiwan=False):
+    try:
+        if is_taiwan:
+            symbol = f"{symbol}.TW"
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        past = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
+        news = get_finnhub_json("company-news", {"symbol": symbol, "from": past, "to": today})
+        if not isinstance(news, list):
+            logger.warning(f"No news data for {symbol}")
+            return []
+        news = sorted(news, key=lambda x: x.get("datetime", 0), reverse=True)[:10]
+        for n in news:
+            try:
+                n["datetime"] = datetime.datetime.utcfromtimestamp(n["datetime"]).strftime("%Y-%m-%d %H:%M")
+            except:
+                n["datetime"] = "未知時間"
+        return news
+    except Exception as e:
+        logger.error(f"Error fetching news for {symbol}: {e}")
+        return []
+
+def get_company_profile(symbol, is_taiwan=False):
+    try:
+        if is_taiwan:
+            symbol = f"{symbol}.TW"
+        profile = get_finnhub_json("stock/profile2", {"symbol": symbol})
+        if not profile:
+            logger.warning(f"No profile data for {symbol}")
+        return profile
+    except Exception as e:
+        logger.error(f"Error fetching company profile for {symbol}: {e}")
+        return {}
+
+def calculate_rsi(series, period=14):
+    try:
+        delta = series.diff(1)
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(window=period, min_periods=1).mean()
+        avg_loss = loss.rolling(window=period, min_periods=1).mean()
+        rs = avg_gain / avg_loss
+        rs = rs.replace([float('inf'), -float('inf')], 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.iloc[-1]
+    except Exception as e:
+        logger.error(f"Error calculating RSI: {e}")
+        return 'N/A'
+
+def get_historical_data(symbol, is_taiwan=False):
+    try:
+        if is_taiwan:
+            stock = Stock(symbol)
+            today = datetime.datetime.today()
+            before = today - datetime.timedelta(days=365)
+            stock.fetch_from(before.year, before.month)
+            if not stock.data:
+                logger.warning(f"No historical data for Taiwan stock {symbol}")
+                return pd.DataFrame(), {}
+            data_dict = {
+                'Date': stock.date,
+                'Open': stock.open,
+                'High': stock.high,
+                'Low': stock.low,
+                'Close': stock.close,
+                'Volume': stock.capacity
+            }
+            df = pd.DataFrame(data_dict)
+            df.set_index('Date', inplace=True)
+            df = df.dropna(subset=['Close'])
+        else:
+            df = pd.DataFrame()
+            for attempt in range(3):
+                try:
+                    df = yf.download(symbol, period="1y", progress=False)
+                    if not df.empty:
+                        break
+                    time.sleep(2)
+                except Exception as e:
+                    logger.warning(f"[YF Historical Error] Attempt {attempt + 1} for {symbol}: {e}")
+                    time.sleep(2)
+            if df.empty:
+                logger.warning(f"No historical data for {symbol}")
+                return pd.DataFrame(), {}
+        
+        window_50 = min(50, len(df))
+        ma50 = df['Close'].rolling(window=window_50).mean().iloc[-1] if len(df) >= 1 else 'N/A'
+        rsi = calculate_rsi(df['Close'])
+        ema12 = df['Close'].ewm(span=12, adjust=False).mean().iloc[-1] if len(df) >= 12 else 'N/A'
+        ema26 = df['Close'].ewm(span=26, adjust=False).mean().iloc[-1] if len(df) >= 26 else 'N/A'
+        macd = ema12 - ema26 if pd.notnull(ema12) and pd.notnull(ema26) else 'N/A'
+        tail_20 = min(20, len(df))
+        support = df['Low'].tail(tail_20).min() if len(df) >= 1 else 'N/A'
+        resistance = df['High'].tail(tail_20).max() if len(df) >= 1 else 'N/A'
+        volume = df['Volume'].iloc[-1] if 'Volume' in df.columns and len(df) > 0 else 'N/A'
+        technical = {
+            'ma50': round(float(ma50), 2) if pd.notnull(ma50) else 'N/A',
+            'rsi': round(float(rsi), 2) if pd.notnull(rsi) else 'N/A',
+            'macd': round(float(macd), 2) if pd.notnull(macd) else 'N/A',
+            'support': round(float(support), 2) if pd.notnull(support) else 'N/A',
+            'resistance': round(float(resistance), 2) if pd.notnull(resistance) else 'N/A',
+            'volume': int(volume) if pd.notnull(volume) and volume != 'N/A' else 'N/A'
+        }
+        return df, technical
+    except Exception as e:
+        logger.error(f"Error in get_historical_data for {symbol}: {e}")
+        return pd.DataFrame(), {}
+
+def get_plot_html(df, symbol, currency="TWD"):
+    try:
+        if df.empty or 'Close' not in df.columns:
+            return "<p class='text-danger'>📊 無法取得股價趨勢圖 / Unable to fetch price trend chart</p>"
+        df_plot = df.tail(7)
+        dates = df_plot.index.strftime('%Y-%m-%d').tolist()
+        closes = df_plot['Close'].round(2).tolist()
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=dates, y=closes, mode='lines+markers', name='Close Price'))
+        fig.update_layout(
+            title=f"{symbol} 最近7日收盤價 / 7-Day Closing Price Trend",
+            xaxis_title="日期 / Date",
+            yaxis_title=f"收盤價 ({currency})",
+            template="plotly_white",
+            height=400
+        )
+        return fig.to_html(full_html=False, include_plotlyjs='cdn', default_height="400px", default_width="100%")
+    except Exception as e:
+        logger.error(f"Error generating plot for {symbol}: {e}")
+        return "<p class='text-danger'>📊 無法生成股價趨勢圖 / Unable to generate price trend chart</p>"
 
 # ------------------ Flask routes ------------------
 @app.route("/", methods=["GET", "POST"])
@@ -161,13 +345,13 @@ def index():
 
     if request.method == "POST":
         if request_count >= current_limit:
-            result["error"] = f"已達 {current_tier_name} 等級請求上限，請升級方案"
+            result["error"] = f"已達 {current_tier_name} 等級請求上限，請升級方案 / Request limit reached for {current_tier_name}, please upgrade your plan"
             return render_template("index.html", result=result, symbol_input=symbol,
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
 
-        symbol = request.form.get("symbol", "").strip()
+        symbol = request.form.get("symbol", "").strip().upper()
         if not symbol:
             result["error"] = "請輸入股票代號 / Please enter a stock symbol"
             return render_template("index.html", result=result, symbol_input=symbol,
@@ -175,66 +359,122 @@ def index():
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
 
-        if symbol not in codes:
-            result["error"] = f"無效的股票代號 {symbol} / Invalid stock symbol {symbol}"
-            return render_template("index.html", result=result, symbol_input=symbol,
-                                   tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
-                                   stripe_mode=STRIPE_MODE, request_count=request_count,
-                                   current_tier_name=current_tier_name, current_limit=current_limit)
-
         try:
             session["request_count"] = request_count + 1
-            df, quote, technical = get_stock_data(symbol)
-            if df is None:
-                error_msg = f"無法取得 {symbol} 的股票資料 / Unable to fetch data for {symbol}"
-                logger.error(error_msg)
-                result["error"] = error_msg
+            # Determine if symbol is Taiwan stock (4-digit numeric)
+            is_taiwan = len(symbol) == 4 and symbol.isdigit()
+            currency = "TWD" if is_taiwan else "USD"
+
+            # Fetch quote
+            quote = get_quote(symbol, is_taiwan)
+            if not quote or all(v == 'N/A' for v in quote.values()):
+                result["error"] = f"無法取得 {symbol} 的即時報價資料 / Unable to fetch quote data for {symbol}"
+                logger.error(f"No valid quote data for {symbol}")
                 return render_template("index.html", result=result, symbol_input=symbol,
                                        tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                        stripe_mode=STRIPE_MODE, request_count=request_count,
                                        current_tier_name=current_tier_name, current_limit=current_limit)
 
-            plot_html = get_plot_html(df, symbol)
+            # Fetch other data
+            metrics = filter_metrics(get_metrics(symbol, is_taiwan))
+            news = get_recent_news(symbol, is_taiwan)
+            profile = get_company_profile(symbol, is_taiwan)
+            industry_en = profile.get("finnhubIndustry", "Unknown")
+            industry_zh = industry_mapping.get(industry_en, "未知")
+            df, technical = get_historical_data(symbol, is_taiwan)
+            quote['volume'] = technical.get('volume', quote.get('volume', 'N/A'))
+            plot_html = get_plot_html(df, symbol, currency)
+
+            # Best Four Point analysis for Taiwan stocks
+            bfp_signal = "無明確信號 / No clear signal"
+            if is_taiwan:
+                try:
+                    stock = Stock(symbol)
+                    if stock.data:
+                        bfp = BestFourPoint(stock)
+                        best = bfp.best_four_point()
+                        if best:
+                            bfp_signal = f"買入信號: {best[1]} / Buy signal: {best[1]}" if best[0] else f"賣出信號: {best[1]} / Sell signal: {best[1]}"
+                    else:
+                        logger.warning(f"No stock data for BestFourPoint analysis for {symbol}")
+                except Exception as e:
+                    logger.error(f"Error in BestFourPoint analysis for {symbol}: {e}")
+                    bfp_signal = "無法計算最佳四點信號 / Unable to calculate Best Four Point signal"
+
+            # Prepare prompt for GPT analysis
             technical_str = ", ".join(f"{k.upper()}: {v}" for k, v in technical.items() if v != 'N/A')
-            company_name = codes[symbol].get("name", "未知")
-            prompt = f"請根據以下資訊產出中英文雙語股票分析: 股票代號: {symbol}, 公司名稱: {company_name}, 目前價格: {quote.get('current_price','N/A')}, 技術指標: {technical_str}. 請提供買入/賣出/持有建議."
-            chat_response = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "你是一位中英雙語金融分析助理，中英文內容完全對等。請以JSON格式回應: {'recommendation': 'buy' or 'sell' or 'hold', 'rationale': '中文 rationale\\nEnglish rationale', 'risk': '中文 risk\\nEnglish risk', 'summary': '中文 summary\\nEnglish summary'}"},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=999,
-                temperature=0.6,
-                response_format={"type": "json_object"}
+            prompt = (
+                f"請根據以下資訊產出中英文雙語股票分析: "
+                f"股票代號: {symbol}, "
+                f"目前價格: {quote.get('current_price', 'N/A')} {currency}, "
+                f"產業分類: {industry_zh} ({industry_en}), "
+                f"財務指標: {metrics}, "
+                f"技術指標: {technical_str}, "
+                f"最佳四點信號: {bfp_signal}. "
+                f"請提供買入/賣出/持有建議."
             )
             try:
+                chat_response = openai.ChatCompletion.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是一位中英雙語金融分析助理，中英文內容完全對等。"
+                                "請以JSON格式回應: "
+                                "{'recommendation': 'buy' or 'sell' or 'hold', "
+                                "'rationale': '中文 rationale\\nEnglish rationale', "
+                                "'risk': '中文 risk\\nEnglish risk', "
+                                "'summary': '中文 summary\\nEnglish summary'}"
+                            )
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=999,
+                    temperature=0.6,
+                    response_format={"type": "json_object"}
+                )
                 gpt_analysis = json.loads(chat_response['choices'][0]['message']['content'])
-            except:
-                gpt_analysis = {'summary': chat_response['choices'][0]['message']['content'].strip() + "\n\n---\n\n*以上分析僅供參考，投資有風險*"}
+            except Exception as e:
+                logger.error(f"OpenAI API error for {symbol}: {e}")
+                gpt_analysis = {
+                    'summary': (
+                        f"無法生成分析，請稍後重試 / Failed to generate analysis, please try again later\n\n"
+                        f"---\n\n*以上分析僅供參考，投資有風險 / The above analysis is for reference only, investment carries risks*"
+                    )
+                }
 
             result = {
                 "symbol": symbol,
-                "company_name": company_name,
-                "quote": quote,
-                "technical": {k: v if v != 'N/A' else 'N/A' for k, v in technical.items()},
+                "quote": {k: v for k, v in quote.items() if v != 'N/A'},
+                "industry_en": industry_en,
+                "industry_zh": industry_zh,
+                "metrics": metrics,
+                "news": news,
                 "gpt_analysis": gpt_analysis,
-                "plot_html": plot_html
+                "plot_html": plot_html,
+                "technical": {k: v for k, v in technical.items() if v != 'N/A'},
+                "is_taiwan": is_taiwan,
+                "currency": currency,
+                "bfp_signal": bfp_signal
             }
         except Exception as e:
-            result = {"error": f"資料讀取錯誤: {e}"}
-            logger.error(f"Processing error for symbol {symbol}: {e}", exc_info=True)
+            result = {"error": f"無法取得 {symbol} 的股票資料 / Unable to fetch data for {symbol}: {str(e)}"}
+            logger.error(f"Processing error for symbol {symbol}: {e}")
 
-    return render_template("index.html",
-                           result=result,
-                           symbol_input=symbol,
-                           QUOTE_FIELDS=QUOTE_FIELDS,
-                           tiers=PRICING_TIERS,
-                           stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
-                           stripe_mode=STRIPE_MODE,
-                           request_count=request_count,
-                           current_tier_name=current_tier_name,
-                           current_limit=current_limit)
+    return render_template(
+        "index.html",
+        result=result,
+        symbol_input=symbol,
+        QUOTE_FIELDS=QUOTE_FIELDS,
+        METRIC_NAMES_ZH_EN=METRIC_NAMES_ZH_EN,
+        tiers=PRICING_TIERS,
+        stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
+        stripe_mode=STRIPE_MODE,
+        request_count=request_count,
+        current_tier_name=current_tier_name,
+        current_limit=current_limit
+    )
 
 # ------------------ Stripe & Subscription Routes ------------------
 @app.route("/create-checkout-session", methods=["POST"])
