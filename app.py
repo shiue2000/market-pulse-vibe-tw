@@ -291,8 +291,10 @@ def validate_price_id(price_id, tier_name):
 def get_stock_data(sid):
     try:
         stock = Stock(sid)
+        logger.debug(f"Fetched data for {sid}: {len(stock.data)} records")
         if not stock.data:
-            return None, None
+            logger.error(f"No data returned for {sid}")
+            return None, None, None
         # Convert to DataFrame for easier manipulation
         df = pd.DataFrame({
             'Date': stock.date,
@@ -328,9 +330,10 @@ def get_stock_data(sid):
             'volume': volume if volume else 'N/A'
         }
         
+        logger.debug(f"Stock data processed for {sid}: Quote={quote}, Technical={technical}")
         return df, quote, technical
     except Exception as e:
-        logger.error(f"Error fetching stock data for {sid}: {e}")
+        logger.error(f"Error fetching stock data for {sid}: {str(e)}", exc_info=True)
         return None, None, None
 
 def get_plot_html(df, sid):
