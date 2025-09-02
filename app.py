@@ -5,16 +5,15 @@ from flask import Flask, render_template, request, session, redirect, url_for, f
 import openai
 import plotly.graph_objs as go
 import stripe
-from dotenv import load_dotenv
+import os
 import logging
 import time
 import pandas as pd
-import json, os
+import json
 from twstock import Stock as TwStock, realtime as twrealtime, codes as twcodes
 from twstock import BestFourPoint as TwBestFourPoint
 
 # ------------------ Load environment ------------------
-load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
 # Stripe keys
@@ -32,7 +31,7 @@ STRIPE_PRICE_IDS = {
     "Tier 4": os.getenv("STRIPE_PRICE_TIER4"),
 }
 if not OPENAI_API_KEY:
-    raise RuntimeError("❌ OPENAI_API_KEY not set in .env")
+    raise RuntimeError("❌ OPENAI_API_KEY not set in environment variables")
 # Set Stripe keys
 if STRIPE_MODE == "live":
     STRIPE_SECRET_KEY = STRIPE_LIVE_SECRET_KEY
@@ -41,7 +40,7 @@ else:
     STRIPE_SECRET_KEY = STRIPE_TEST_SECRET_KEY
     STRIPE_PUBLISHABLE_KEY = STRIPE_TEST_PUBLISHABLE_KEY
 if not STRIPE_SECRET_KEY or not STRIPE_PUBLISHABLE_KEY:
-    raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in .env")
+    raise RuntimeError(f"❌ Stripe keys for mode '{STRIPE_MODE}' not set in environment variables")
 stripe.api_key = STRIPE_SECRET_KEY
 
 # ------------------ Logger setup ------------------
@@ -103,6 +102,9 @@ def validate_price_id(price_id, tier_name):
 
 def get_quote(symbol):
     try:
+        if symbol not in twcodes:
+            logger.warning(f"Symbol {symbol} not found in twcodes")
+            return {}
         data = twrealtime.get(symbol)
         if not data.get('success'):
             logger.warning(f"No real-time data for symbol {symbol}")
@@ -129,7 +131,7 @@ def get_quote(symbol):
                     change = (float(current_price) - previous_close) / previous_close * 100
                     quote['daily_change'] = round(change, 2)
                 except ValueError:
-                    pass
+                    logger.warning(f"Unable to calculate daily change for {symbol}")
         return quote
     except Exception as e:
         logger.error(f"Error fetching quote for {symbol}: {e}")
@@ -137,6 +139,9 @@ def get_quote(symbol):
 
 def get_historical_data(symbol):
     try:
+        if symbol not in twcodes:
+            logger.warning(f"Symbol {symbol} not found in twcodes")
+            return pd.DataFrame(), {}
         stock = TwStock(symbol)
         current_year = datetime.datetime.now().year
         stock.fetch_from(current_year - 1, 1)  # Fetch data from January of last year to now
@@ -197,6 +202,7 @@ def calculate_rsi(series, period=14):
 
 def get_plot_html(df, symbol):
     if df.empty or 'Close' not in df.columns:
+        logger.warning(f"No data to plot for {symbol}")
         return "<p class='text-danger'>📊 無法取得股價趨勢圖</p>"
     df_plot = df.tail(7)
     dates = df_plot.index.strftime('%Y-%m-%d').tolist()
@@ -232,6 +238,15 @@ def index():
         symbol = request.form.get("symbol", "").strip().upper()
         if not symbol:
             result["error"] = "請輸入股票代號 / Please enter a stock symbol"
+            return render_template("index.html", result=result, symbol_input=symbol,
+                                   tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
+                                   stripe_mode=STRIPE_MODE, request_count=request_count,
+                                   current_tier_name=current_tier_name, current_limit=current_limit)
+        if symbol not in twcodes:
+            result = {
+                "error": f"無效的股票代號: {symbol} / Invalid stock symbol: {symbol}",
+                "profile": {'name': 'N/A', 'group': '未知'}
+            }
             return render_template("index.html", result=result, symbol_input=symbol,
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
@@ -279,11 +294,11 @@ def index():
                 "gpt_analysis": gpt_analysis,
                 "plot_html": plot_html,
                 "technical": technical,
-                "profile": profile  # Add profile to result
+                "profile": profile  # Ensure profile is included
             }
         except Exception as e:
             result = {
-                "error": f"資料讀取錯誤: {e}",
+                "error": f"資料讀取錯誤: {e} / Data retrieval error: {e}",
                 "profile": {'name': 'N/A', 'group': '未知'}  # Provide default profile
             }
             logger.error(f"Processing error for symbol {symbol}: {e}")
@@ -359,4 +374,4 @@ def reset():
 
 # ------------------ Run App ------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=True)
