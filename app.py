@@ -7,8 +7,8 @@ from collections import namedtuple
 import json
 import requests
 from flask import Flask, request, render_template, jsonify, redirect, session, flash, url_for
-from flask_wtf.csrf import CSRFProtect  # Added for CSRF protection
-from flask_caching import Cache  # Added for caching
+from flask_wtf.csrf import CSRFProtect
+from flask_caching import Cache
 import stripe
 import numpy as np
 import logging
@@ -33,7 +33,7 @@ app.secret_key = os.getenv("SECRET_KEY")
 if not app.secret_key:
     raise RuntimeError("SECRET_KEY environment variable is not set")
 app.config["SESSION_PERMANENT"] = False
-app.config["WTF_CSRF_ENABLED"] = True  # Enable CSRF protection
+app.config["WTF_CSRF_ENABLED"] = True
 
 # Logger
 logging.basicConfig(level=logging.INFO)
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 csrf = CSRFProtect(app)
 
 # Caching
-cache = Cache(app, config={"CACHE_TYPE": "SimpleCache"})  # In-memory cache; consider Redis for production
+cache = Cache(app, config={"CACHE_TYPE": "SimpleCache"})
 
 # ---------- Stripe config ----------
 STRIPE_TEST_SECRET_KEY = os.getenv("STRIPE_TEST_SECRET_KEY")
@@ -82,7 +82,7 @@ if not OPENAI_API_KEY:
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---------- In-memory storage & constants ----------
-user_data = {}  # Replace with database in production
+user_data = {}
 
 QUOTE_FIELDS = {
     "current_price": ("目前價格", "Current Price"),
@@ -288,7 +288,7 @@ class Stock:
             logger.error(f"Stock data fetch failed for {self.symbol}: {e}")
 
 # ---------- Helpers: Finnhub and data lookups ----------
-@cache.memoize(timeout=3600)  # Cache for 1 hour
+@cache.memoize(timeout=3600)
 def get_finnhub_json(endpoint: str, params: dict) -> dict:
     if not FINNHUB_API_KEY:
         logger.error("Finnhub API key not set; returning empty response")
@@ -313,7 +313,7 @@ def get_finnhub_json(endpoint: str, params: dict) -> dict:
     logger.error(f"Finnhub API failed after retries for {endpoint}")
     return {}
 
-@cache.memoize(timeout=3600)  # Cache for 1 hour
+@cache.memoize(timeout=3600)
 def get_stock_name(symbol: str) -> str:
     logger.info(f"Fetching stock name for: {symbol}")
     if not re.match(r"^\d{4}$", symbol):
@@ -495,7 +495,7 @@ def get_stock_data(symbol: str) -> dict:
 
 # ---------- Flask routes ----------
 @app.route("/", methods=["GET", "POST"])
-@csrf.exempt  # Exempt CSRF for this route, as it's handled manually in the form
+@csrf.exempt
 def index():
     symbol_input = ""
     result = {}
@@ -540,7 +540,7 @@ def index():
         tiers=PRICING_TIERS,
         stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
         stripe_mode=STRIPE_MODE,
-        csrf_token=session.get("csrf_token"),  # Pass CSRF token to template
+        csrf_token=session.get("csrf_token"),
     )
 
 @app.route("/create-checkout-session", methods=["POST"])
@@ -595,7 +595,7 @@ def payment_success():
     return redirect(url_for("index"))
 
 @app.route("/webhook", methods=["POST"])
-@csrf.exempt  # Webhooks typically bypass CSRF
+@csrf.exempt
 def stripe_webhook():
     payload = request.get_data(as_text=True)
     sig_header = request.headers.get("Stripe-Signature")
