@@ -12,7 +12,6 @@ import pandas as pd
 import json, os
 from twstock import Stock as TwStock, realtime as twrealtime, codes as twcodes
 from twstock import BestFourPoint as TwBestFourPoint
-
 # ------------------ Load environment ------------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -95,30 +94,43 @@ PRICING_TIERS = [
 # ------------------ Helper functions ------------------
 def validate_price_id(price_id, tier_name):
     return bool(price_id)
-
 def get_quote(symbol):
     try:
         data = twrealtime.get(symbol)
         if not data.get('success'):
             return {}
         rt = data['realtime']
+        current_price = rt.get('latest_trade_price', 'N/A')
         quote = {
-            'current_price': rt.get('latest_trade_price', 'N/A'),
+            'current_price': current_price,
             'open': rt.get('open', 'N/A'),
             'high': rt.get('high', 'N/A'),
             'low': rt.get('low', 'N/A'),
-            'previous_close': rt.get('previous_close', 'N/A'),
-            'daily_change': rt.get('daily_change', 'N/A'),
+            'previous_close': 'N/A',
+            'daily_change': 'N/A',
             'volume': rt.get('accumulate_trade_volume', 'N/A')
         }
+        # Fetch previous close from historical data
+        stock = TwStock(symbol)
+        historical = stock.fetch_31()
+        if historical:
+            previous_close = historical[-1].close
+            quote['previous_close'] = previous_close
+            if current_price != 'N/A' and current_price != '-' and previous_close:
+                try:
+                    change = (float(current_price) - previous_close) / previous_close * 100
+                    quote['daily_change'] = round(change, 2)
+                except ValueError:
+                    pass
         return quote
     except Exception as e:
         logger.error(f"Error fetching quote for {symbol}: {e}")
         return {}
-
 def get_historical_data(symbol):
     try:
         stock = TwStock(symbol)
+        current_year = datetime.datetime.now().year
+        stock.fetch_from(current_year - 1, 1)  # Fetch data from January of last year to now
         df = pd.DataFrame(stock.data)
         df = df.rename(columns={'date': 'Date', 'capacity': 'Volume', 'turnover': 'Turnover', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'change': 'Change', 'transaction': 'Transaction'})
         df.set_index('Date', inplace=True)
@@ -146,7 +158,6 @@ def get_historical_data(symbol):
     except Exception as e:
         logger.error(f"Error fetching historical data for {symbol}: {e}")
         return pd.DataFrame(), {}
-
 def get_company_profile(symbol):
     try:
         code_info = twcodes[symbol]
@@ -157,7 +168,6 @@ def get_company_profile(symbol):
     except Exception as e:
         logger.error(f"Error fetching company profile for {symbol}: {e}")
         return {}
-
 def calculate_rsi(series, period=14):
     delta = series.diff(1)
     gain = delta.where(delta > 0, 0)
@@ -167,7 +177,6 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]
-
 def get_plot_html(df, symbol):
     if df.empty or 'Close' not in df.columns:
         return "<p class='text-danger'>📊 無法取得股價趨勢圖</p>"
@@ -184,7 +193,6 @@ def get_plot_html(df, symbol):
         height=400
     )
     return fig.to_html(full_html=False, include_plotlyjs='cdn', default_height="400px", default_width="100%")
-
 # ------------------ Flask routes ------------------
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -195,7 +203,6 @@ def index():
     request_count = session.get("request_count", 0)
     current_limit = current_tier["limit"]
     current_tier_name = current_tier["name"]
-
     if request.method == "POST":
         if request_count >= current_limit:
             result["error"] = f"已達 {current_tier_name} 等級請求上限，請升級方案"
@@ -203,7 +210,6 @@ def index():
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
-
         symbol = request.form.get("symbol", "").strip().upper()
         if not symbol:
             result["error"] = "請輸入股票代號 / Please enter a stock symbol"
@@ -214,23 +220,23 @@ def index():
         try:
             session["request_count"] = request_count + 1
             quote = get_quote(symbol)
-            metrics = {}  # Skip, or use custom calculation if needed
-            news = []  # Skip news
+            metrics = {} # Skip, or use custom calculation if needed
+            news = [] # Skip news
             profile = get_company_profile(symbol)
             industry_zh = profile.get('group', '未知')
-            industry_en = "Unknown"  # Map if needed
+            industry_en = next((en for en, zh in industry_mapping.items() if zh == industry_zh), "Unknown")
             df, technical = get_historical_data(symbol)
             plot_html = get_plot_html(df, symbol)
             bfp_signal = "無明確信號 / No clear signal"
             try:
                 stock = TwStock(symbol)
+                stock.fetch_31()  # Fetch recent data for BestFourPoint analysis
                 bfp = TwBestFourPoint(stock)
                 best = bfp.best_four_point()
                 if best:
                     bfp_signal = f"買入信號: {best[1]}" if best[0] else f"賣出信號: {best[1]}"
             except Exception as e:
                 logger.error(f"Error in BestFourPoint analysis for {symbol}: {e}")
-
             technical_str = ", ".join(f"{k.upper()}: {v}" for k, v in technical.items() if v != 'N/A')
             prompt = f"請根據以下資訊產出中英文雙語股票分析: 股票代號: {symbol}, 目前價格: {quote.get('current_price', 'N/A')}, 產業分類: {industry_zh} ({industry_en}), 財務指標: {metrics}, 技術指標: {technical_str}, 最佳四點信號: {bfp_signal}. 請提供買入/賣出/持有建議."
             chat_response = openai.ChatCompletion.create(
@@ -258,7 +264,6 @@ def index():
         except Exception as e:
             result = {"error": f"資料讀取錯誤: {e}"}
             logger.error(f"Processing error for symbol {symbol}: {e}")
-
     return render_template("index.html",
                            result=result,
                            symbol_input=symbol,
@@ -270,7 +275,6 @@ def index():
                            request_count=request_count,
                            current_tier_name=current_tier_name,
                            current_limit=current_limit)
-
 # ------------------ Stripe & Subscription Routes ------------------
 @app.route("/create-checkout-session", methods=["POST"])
 def create_checkout_session():
@@ -279,20 +283,17 @@ def create_checkout_session():
     if not tier:
         logger.error(f"Invalid tier requested: {tier_name}")
         return jsonify({"error": "Invalid tier"}), 400
-
     if tier["name"] == "Free":
         session["subscribed"] = False
         session["paid_tier"] = 0
         session["request_count"] = 0
         flash("✅ Switched to Free tier.", "success")
         return jsonify({"url": url_for("index", _external=True)})
-
     price_id = STRIPE_PRICE_IDS.get(tier_name)
     if not price_id or not validate_price_id(price_id, tier_name):
         logger.error(f"No valid Price ID configured for {tier_name}")
         flash(f"⚠️ Subscription for {tier_name} is currently unavailable.", "warning")
         return jsonify({"error": f"Subscription for {tier_name} is currently unavailable"}), 400
-
     try:
         logger.info(f"Creating Stripe checkout session for {tier_name} with Price ID: {price_id}")
         session_stripe = stripe.checkout.Session.create(
@@ -306,7 +307,6 @@ def create_checkout_session():
     except Exception as e:
         logger.error(f"Unexpected Stripe error: {e}")
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
-
 @app.route("/payment-success/<tier_name>")
 def payment_success(tier_name):
     tier_index = next((i for i, t in enumerate(PRICING_TIERS) if t["name"] == tier_name), None)
@@ -317,7 +317,6 @@ def payment_success(tier_name):
         flash(f"✅ Subscription successful for {tier_name} plan.", "success")
         logger.info(f"Subscription successful for {tier_name} (tier index: {tier_index})")
     return redirect(url_for("index"))
-
 @app.route("/reset", methods=["POST"])
 def reset():
     password = request.form.get("password")
@@ -331,7 +330,6 @@ def reset():
         flash("❌ Incorrect password.", "danger")
         logger.warning("Failed reset attempt with incorrect password")
     return redirect(url_for("index"))
-
 # ------------------ Run App ------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=True)
