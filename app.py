@@ -259,7 +259,7 @@ def get_stock_news(symbol, company_name, limit=5):
                 logger.warning(f"NewsAPI error: {data.get('message', 'Unknown error')}")
         except Exception as e:
             logger.error(f"Error fetching NewsAPI news for {symbol}: {e}")
-    if not news:
+    if news:
         logger.info(f"No NewsAPI results for {symbol}; falling back to TWSE")
         news = get_twse_news(symbol, company_name, limit)
     if not news:
