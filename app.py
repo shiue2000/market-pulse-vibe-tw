@@ -100,113 +100,16 @@ PRICING_TIERS = [
     {"name": "Tier 4", "limit": 800, "price": 39.99},
 ]
 
-# Hard-coded symbol mappings for common cases (case-insensitive)
-SYMBOL_MAPPINGS = {
-    "台積電": "2330.TW",
-    "tsmc": "2330.TW",
-    "taiwan semiconductor manufacturing": "2330.TW",
-    "2330": "2330.TW"
-}
-
 # ------------------ Helper functions ------------------
 def validate_price_id(price_id, tier_name):
     return bool(price_id)
 
-def resolve_symbol(input_str):
-    input_str = input_str.strip().lower()  # Normalize input to lowercase
-    if not input_str:
-        return None
-    logger.info(f"Resolving symbol: {input_str}")
-    
-    # Initialize cache if not present
-    if "symbol_cache" not in session:
-        session["symbol_cache"] = {}
-    cache = session["symbol_cache"]
-
-    # Check cache
-    if input_str in cache:
-        logger.info(f"Cache hit for {input_str}: {cache[input_str]}")
-        return cache[input_str]
-
-    # Check hard-coded mappings
-    for key, symbol in SYMBOL_MAPPINGS.items():
-        if input_str == key.lower():
-            profile = get_company_profile(symbol.split('.')[0])
-            if profile and profile.get('name'):
-                cache[input_str] = symbol
-                session["symbol_cache"] = cache
-                logger.info(f"Resolved {input_str} to {symbol} via mapping")
-                return symbol
-
-    # Handle direct symbols with .TW or .TWO
-    if '.' in input_str:
-        parts = input_str.rsplit('.', 1)
-        symbol = parts[0].upper() + '.' + parts[1].upper()
-        if symbol.endswith('.TW') or symbol.endswith('.TWO'):
-            profile = get_company_profile(symbol.split('.')[0])
-            if profile and profile.get('name'):
-                cache[input_str] = symbol
-                session["symbol_cache"] = cache
-                logger.info(f"Resolved {input_str} to {symbol} via direct symbol")
-                return symbol
-
-    # Handle numeric stock IDs
-    if input_str.isdigit():
-        for suffix in ['.TW', '.TWO']:
-            symbol = input_str + suffix
-            profile = get_company_profile(symbol.split('.')[0])
-            if profile and profile.get('name'):
-                cache[input_str] = symbol
-                session["symbol_cache"] = cache
-                logger.info(f"Resolved {input_str} to {symbol} via numeric ID")
-                return symbol
-        return None
-
-    # Handle company names via twcodes search
-    for code, info in twcodes.items():
-        if input_str in info.name.lower() or input_str in code.lower():
-            for suffix in ['.TW', '.TWO']:
-                symbol = code + suffix
-                profile = get_company_profile(code)
-                if profile and profile.get('name'):
-                    cache[input_str] = symbol
-                    session["symbol_cache"] = cache
-                    logger.info(f"Resolved {input_str} to {symbol} via twcodes search")
-                    return symbol
-
-    # Fallback to OpenAI
-    try:
-        prompt = (
-            f"將以下輸入轉換為台灣股票代號（必須以 .TW 或 .TWO 結尾，例如 2330.TW）。"
-            f"如果輸入是 '台積電'、'TSMC'、'tsmc' 或 '2330'，應回傳 '2330.TW'。輸入：{input_str}。僅回覆代號，例如 2330.TW。"
-        )
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=50,
-            temperature=0.2
-        )
-        suggested_symbol = response['choices'][0]['message']['content'].strip()
-        if suggested_symbol.endswith('.TW') or suggested_symbol.endswith('.TWO'):
-            profile = get_company_profile(suggested_symbol.split('.')[0])
-            if profile and profile.get('name'):
-                cache[input_str] = suggested_symbol
-                session["symbol_cache"] = cache
-                logger.info(f"Resolved {input_str} to {suggested_symbol} via OpenAI")
-                return suggested_symbol
-    except Exception as e:
-        logger.warning(f"OpenAI symbol resolution error for {input_str}: {e}")
-
-    logger.warning(f"Failed to resolve symbol: {input_str}")
-    return None
-
 def get_quote(symbol):
     try:
-        code = symbol.split('.')[0]
-        if code not in twcodes:
+        if symbol not in twcodes:
             logger.warning(f"Symbol {symbol} not found in twcodes")
             return {}
-        data = twrealtime.get(code)
+        data = twrealtime.get(symbol)
         if not data.get('success'):
             logger.warning(f"No real-time data for symbol {symbol}")
             return {}
@@ -222,7 +125,7 @@ def get_quote(symbol):
             'volume': rt.get('accumulate_trade_volume', 'N/A')
         }
         # Fetch previous close from historical data
-        stock = TwStock(code)
+        stock = TwStock(symbol)
         historical = stock.fetch_31()
         if historical:
             previous_close = historical[-1].close
@@ -240,11 +143,10 @@ def get_quote(symbol):
 
 def get_historical_data(symbol):
     try:
-        code = symbol.split('.')[0]
-        if code not in twcodes:
+        if symbol not in twcodes:
             logger.warning(f"Symbol {symbol} not found in twcodes")
             return pd.DataFrame(), {}
-        stock = TwStock(code)
+        stock = TwStock(symbol)
         current_year = datetime.datetime.now().year
         stock.fetch_from(current_year - 1, 1)  # Fetch data from January of last year to now
         df = pd.DataFrame(stock.data)
@@ -280,11 +182,10 @@ def get_historical_data(symbol):
 
 def get_company_profile(symbol):
     try:
-        code = symbol.split('.')[0]
-        if code not in twcodes:
+        if symbol not in twcodes:
             logger.warning(f"Symbol {symbol} not found in twcodes")
             return {'name': 'N/A', 'group': '未知'}
-        code_info = twcodes[code]
+        code_info = twcodes[symbol]
         return {
             'name': code_info.name,
             'group': code_info.group
@@ -310,7 +211,7 @@ def get_twse_news(symbol, company_name, limit=5):
             if title_elem and date_elem:
                 title = title_elem.text.strip()
                 # Filter for company_name or symbol
-                if company_name.lower() in title.lower() or symbol.lower() in title.lower():
+                if company_name in title or symbol in title:
                     news.append({
                         'title': title,
                         'url': 'https://www.twse.com.tw' + title_elem.get('href', '#'),
@@ -423,7 +324,6 @@ def get_plot_html(df, symbol):
 @app.route("/", methods=["GET", "POST"])
 def index():
     result = {}
-    symbol_input = ""
     symbol = ""
     current_tier_index = session.get("paid_tier", 0)
     current_tier = PRICING_TIERS[current_tier_index]
@@ -433,25 +333,24 @@ def index():
     if request.method == "POST":
         if request_count >= current_limit:
             result["error"] = f"已達 {current_tier_name} 等級請求上限，請升級方案"
-            return render_template("index.html", result=result, symbol_input=symbol_input,
+            return render_template("index.html", result=result, symbol_input=symbol,
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
-        symbol_input = request.form.get("symbol", "").strip()
-        if not symbol_input:
-            result["error"] = "請輸入股票代號、名稱或ID / Please enter a stock symbol, name, or ID"
-            return render_template("index.html", result=result, symbol_input=symbol_input,
-                                   tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
-                                   stripe_mode=STRIPE_MODE, request_count=request_count,
-                                   current_tier_name=current_tier_name, current_limit=current_limit)
-        symbol = resolve_symbol(symbol_input)
+        symbol = request.form.get("symbol", "").strip().upper()
         if not symbol:
+            result["error"] = "請輸入股票代號 / Please enter a stock symbol"
+            return render_template("index.html", result=result, symbol_input=symbol,
+                                   tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
+                                   stripe_mode=STRIPE_MODE, request_count=request_count,
+                                   current_tier_name=current_tier_name, current_limit=current_limit)
+        if symbol not in twcodes:
             result = {
-                "error": f"無效的股票代號或名稱: {symbol_input} / Invalid stock symbol or name: {symbol_input}",
+                "error": f"無效的股票代號: {symbol} / Invalid stock symbol: {symbol}",
                 "profile": {'name': 'N/A', 'group': '未知'},
                 "news": []
             }
-            return render_template("index.html", result=result, symbol_input=symbol_input,
+            return render_template("index.html", result=result, symbol_input=symbol,
                                    tiers=PRICING_TIERS, stripe_pub_key=STRIPE_PUBLISHABLE_KEY,
                                    stripe_mode=STRIPE_MODE, request_count=request_count,
                                    current_tier_name=current_tier_name, current_limit=current_limit)
@@ -459,16 +358,16 @@ def index():
             session["request_count"] = request_count + 1
             quote = get_quote(symbol)
             metrics = {}  # Skip, or use custom calculation if needed
-            profile = get_company_profile(symbol.split('.')[0])
+            profile = get_company_profile(symbol)
             company_name = profile.get('name', 'Unknown')
-            news = get_stock_news(symbol, company_name)
+            news = get_stock_news(symbol, company_name)  # Fetch news
             industry_zh = profile.get('group', '未知')
             industry_en = next((en for en, zh in industry_mapping.items() if zh == industry_zh), "Unknown")
             df, technical = get_historical_data(symbol)
             plot_html = get_plot_html(df, symbol)
             bfp_signal = "無明確信號 / No clear signal"
             try:
-                stock = TwStock(symbol.split('.')[0])
+                stock = TwStock(symbol)
                 stock.fetch_31()  # Fetch recent data for BestFourPoint analysis
                 bfp = TwBestFourPoint(stock)
                 best = bfp.best_four_point()
@@ -511,7 +410,7 @@ def index():
             logger.error(f"Processing error for symbol {symbol}: {e}")
     return render_template("index.html",
                            result=result,
-                           symbol_input=symbol_input,
+                           symbol_input=symbol,
                            QUOTE_FIELDS=QUOTE_FIELDS,
                            METRIC_NAMES_ZH_EN=METRIC_NAMES_ZH_EN,
                            tiers=PRICING_TIERS,
