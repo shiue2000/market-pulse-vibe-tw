@@ -218,6 +218,7 @@ def get_twse_news(symbol, company_name, limit=5):
                         'published_at': date_elem.text.strip(),
                         'source': 'Taiwan Stock Exchange'
                     })
+                print(news)
         logger.info(f"Fetched {len(news)} TWSE news articles for {symbol}: {[article['title'] for article in news]}")
         return news[:limit]
     except Exception as e:
@@ -259,7 +260,7 @@ def get_stock_news(symbol, company_name, limit=5):
                 logger.warning(f"NewsAPI error: {data.get('message', 'Unknown error')}")
         except Exception as e:
             logger.error(f"Error fetching NewsAPI news for {symbol}: {e}")
-    if news:
+    if not news:
         logger.info(f"No NewsAPI results for {symbol}; falling back to TWSE")
         news = get_twse_news(symbol, company_name, limit)
     if not news:
