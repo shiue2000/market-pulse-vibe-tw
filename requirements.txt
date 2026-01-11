@@ -11,3 +11,4 @@ lxml
 twstock
 flask
 beautifulsoup4
+gspread
